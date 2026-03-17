@@ -5,7 +5,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -21,6 +21,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 BASE_LIST_URL = "https://prohardver.hu/temak/notebook/listaz.php"
+
+HSZ_URL_RE = re.compile(
+    r"^(?P<prefix>https?://[^#]+?/hsz_)(?P<start>\d+)-(?P<end>\d+)(?P<suffix>\.html)(?:#msg(?P<msg>\d+))?$",
+    re.IGNORECASE,
+)
 
 
 def build_list_url(offset: int) -> str:
@@ -305,9 +310,7 @@ def parse_comments_from_html(html: str) -> List[Tuple[str, str, str]]:
         comment = extract_comment_text(post)
 
         preview = comment[:120].replace("\n", " | ") if comment else "<üres>"
-        print(
-            f"[DEBUG] Poszt #{index} | data-id={post_id or '-'} | szerző={author} | preview={preview}"
-        )
+        print(f"[DEBUG] Poszt #{index} | data-id={post_id or '-'} | szerző={author} | preview={preview}")
 
         if not comment:
             continue
@@ -338,6 +341,91 @@ def get_next_page_element(driver: webdriver.Chrome):
             except StaleElementReferenceException:
                 continue
     return None
+
+
+def build_fallback_next_hsz_url(current_url: str) -> Optional[str]:
+    """
+    Példa:
+    https://prohardver.hu/tema/ibm_lenovo_thinkpad_topik/hsz_121001-121200.html#msg121201
+    ->
+    https://prohardver.hu/tema/ibm_lenovo_thinkpad_topik/hsz_120901-121000.html#msg121001
+    """
+    m = HSZ_URL_RE.match(current_url)
+    if not m:
+        return None
+
+    prefix = m.group("prefix")
+    start = int(m.group("start"))
+    end = int(m.group("end"))
+    suffix = m.group("suffix")
+
+    width = end - start
+    if width != 199:
+        # A mintából kiindulva 200-as blokkok vannak: 121001-121200
+        # A következő "régebbi" oldal ezért 100-zal csökken mindkét oldalon:
+        # 120901-121000
+        pass
+
+    new_start = start - 100
+    new_end = end - 100
+
+    if new_start < 1 or new_end < 1:
+        return None
+
+    next_anchor_msg = new_end + 1
+    return f"{prefix}{new_start}-{new_end}{suffix}#msg{next_anchor_msg}"
+
+
+def try_go_to_next_page(driver: webdriver.Chrome, delay: float) -> bool:
+    old_url = driver.current_url
+
+    next_el = get_next_page_element(driver)
+    if next_el:
+        try:
+            next_href = next_el.get_attribute("href")
+        except Exception:
+            next_href = None
+
+        print(f"[DEBUG] Következő oldal gomb megvan. href={next_href}")
+
+        if safe_click(driver, next_el):
+            try:
+                WebDriverWait(driver, 20).until(lambda d: d.current_url != old_url)
+                wait_ready(driver)
+                dismiss_known_popups(driver, first_page=False)
+                wait_for_messages(driver)
+                time.sleep(delay)
+                return True
+            except TimeoutException:
+                print("[DEBUG] Következő oldal gomb volt, de timeout lett az átmenetnél.")
+        else:
+            print("[DEBUG] Megvolt a következő oldal gomb, de a kattintás nem sikerült.")
+
+    fallback_url = build_fallback_next_hsz_url(old_url)
+    if not fallback_url:
+        print("[DEBUG] Nincs következő gomb, és URL fallback sem készíthető.")
+        return False
+
+    print(f"[DEBUG] URL fallback próbálva: {fallback_url}")
+
+    try:
+        driver.get(fallback_url)
+        wait_ready(driver)
+        dismiss_known_popups(driver, first_page=False)
+        wait_for_messages(driver)
+        time.sleep(delay)
+
+        if driver.current_url == old_url:
+            print("[DEBUG] URL fallback után ugyanazon az URL-en maradt.")
+            return False
+
+        return True
+    except TimeoutException:
+        print("[DEBUG] URL fallback timeout.")
+        return False
+    except Exception as e:
+        print(f"[DEBUG] URL fallback hiba: {e}")
+        return False
 
 
 def scrape_topic_sequentially(driver: webdriver.Chrome, topic_title: str, topic_url: str, delay: float):
@@ -374,33 +462,12 @@ def scrape_topic_sequentially(driver: webdriver.Chrome, topic_title: str, topic_
             all_comments.append((post_id, author, comment))
             print(f"[DEBUG] MENTÉS -> {author}: {comment[:120].replace(chr(10), ' | ')}")
 
-        next_el = get_next_page_element(driver)
-        if not next_el:
-            print("[DEBUG] Nincs több következő oldal.")
+        moved = try_go_to_next_page(driver, delay)
+        if not moved:
+            print("[DEBUG] Nincs több oldal, vagy nem sikerült továbblépni.")
             break
 
-        try:
-            next_href = next_el.get_attribute("href")
-        except Exception:
-            next_href = None
-
-        print(f"[DEBUG] Következő oldal gomb megvan. href={next_href}")
-
-        old_url = driver.current_url
-        if not safe_click(driver, next_el):
-            print("[DEBUG] Nem sikerült a következő oldal gomb kattintása.")
-            break
-
-        try:
-            WebDriverWait(driver, 20).until(lambda d: d.current_url != old_url)
-            wait_ready(driver)
-            dismiss_known_popups(driver, first_page=False)
-            wait_for_messages(driver)
-            time.sleep(delay)
-            page_index += 1
-        except TimeoutException:
-            print("[DEBUG] A következő oldal betöltése timeout miatt megszakadt.")
-            break
+        page_index += 1
 
     return resolved_title, all_comments
 
