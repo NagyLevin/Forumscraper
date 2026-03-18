@@ -1,5 +1,4 @@
 import argparse
-import os
 import re
 import sys
 import time
@@ -9,19 +8,8 @@ from pathlib import Path
 from typing import List, Optional, Set, Tuple
 from urllib.parse import urljoin
 
+import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import (
-    StaleElementReferenceException,
-    TimeoutException,
-    WebDriverException,
-)
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 BASE_LIST_URL = "https://prohardver.hu/temak/notebook/listaz.php"
 
@@ -77,125 +65,27 @@ def sanitize_filename(name: str, max_len: int = 140) -> str:
     return name or "ismeretlen_topic"
 
 
-def setup_driver(headless: bool = False) -> webdriver.Chrome:
-    # Opcionális: kiiktatjuk a rendszer PATH-ból a zavaró régi chromedriver-t
-    current_path = os.environ.get("PATH", "")
-    path_parts = [p for p in current_path.split(":") if p]
-    filtered_parts = [p for p in path_parts if p != "/usr/bin"]
-    os.environ["PATH"] = ":".join(filtered_parts)
-
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-
-    options.add_argument("--window-size=1600,1200")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--lang=hu-HU")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-
-    # Szerveren általában itt van a Chrome
-    options.binary_location = "/usr/bin/google-chrome"
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.set_page_load_timeout(60)
-    return driver
-
-
-def wait_ready(driver: webdriver.Chrome, timeout: int = 20) -> None:
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
+def make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "hu-HU,hu;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://prohardver.hu/",
+        }
     )
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
+    return session
 
 
-def safe_click(driver: webdriver.Chrome, element) -> bool:
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.2)
-        try:
-            element.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", element)
-        return True
-    except Exception:
-        return False
-
-
-def click_first_visible(driver: webdriver.Chrome, xpaths: List[str], timeout: float = 5.0) -> bool:
-    end_time = time.time() + timeout
-    while time.time() < end_time:
-        for xpath in xpaths:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
-            except Exception:
-                elements = []
-
-            for element in elements:
-                try:
-                    if not element.is_displayed():
-                        continue
-                except StaleElementReferenceException:
-                    continue
-
-                if safe_click(driver, element):
-                    time.sleep(0.8)
-                    return True
-        time.sleep(0.2)
-    return False
-
-
-def reject_cookies(driver: webdriver.Chrome, timeout: float = 8.0) -> bool:
-    xpaths = [
-        "//*[self::button or self::a or self::span][normalize-space()='NEM FOGADOM EL']",
-        "//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyzáéíóöőúüű', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÖŐÚÜŰ'), 'NEM FOGADOM EL')]",
-    ]
-    clicked = click_first_visible(driver, xpaths, timeout=timeout)
-    if clicked:
-        print("[DEBUG] Sütik elutasítva.")
-    return clicked
-
-
-def close_skip_popup(driver: webdriver.Chrome, timeout: float = 4.0) -> bool:
-    xpaths = [
-        "//*[self::button or self::a or self::span][normalize-space()='Lemaradok']",
-        "//*[contains(normalize-space(), 'Lemaradok')]",
-        "//input[@type='button' and @value='Lemaradok']",
-    ]
-    clicked = click_first_visible(driver, xpaths, timeout=timeout)
-    if clicked:
-        print("[DEBUG] Lemaradok popup bezárva.")
-    return clicked
-
-
-def dismiss_known_popups(driver: webdriver.Chrome, first_page: bool = False) -> None:
-    if first_page:
-        reject_cookies(driver, timeout=8.0)
-    close_skip_popup(driver, timeout=3.0)
-
-
-def wait_for_topic_list(driver: webdriver.Chrome, timeout: int = 20) -> None:
-    selectors = [
-        "div.thread-list h4 a[href*='/tema/']",
-        "div.col.thread-title-thread h4 a[href*='/tema/']",
-        "main h4 a[href*='/tema/']",
-        "h4 a[href*='/tema/']",
-    ]
-    for selector in selectors:
-        try:
-            WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-            )
-            return
-        except TimeoutException:
-            pass
-    raise TimeoutException("Nem található topic lista.")
+def fetch(session: requests.Session, url: str, timeout: int = 60) -> Tuple[str, str]:
+    r = session.get(url, timeout=timeout, allow_redirects=True)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding or r.encoding or "utf-8"
+    return r.url, r.text
 
 
 def parse_topic_links(html: str, page_url: str) -> List[Tuple[str, str]]:
@@ -238,28 +128,20 @@ def parse_topic_links(html: str, page_url: str) -> List[Tuple[str, str]]:
     return topics[:100]
 
 
-def wait_for_messages(driver: webdriver.Chrome, timeout: int = 20) -> None:
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "li.media[data-id]"))
-    )
+def page_has_messages_html(html: str) -> bool:
+    soup = BeautifulSoup(html, "html.parser")
+    return len(soup.select("li.media[data-id]")) > 0
 
 
-def page_has_messages(driver: webdriver.Chrome) -> bool:
-    try:
-        items = driver.find_elements(By.CSS_SELECTOR, "li.media[data-id]")
-        return len(items) > 0
-    except Exception:
-        return False
-
-
-def is_404_page(driver: webdriver.Chrome) -> bool:
-    title = clean_text(driver.title).lower()
-    body_text = clean_text(driver.find_element(By.TAG_NAME, "body").text).lower()
+def is_404_html(html: str) -> bool:
+    soup = BeautifulSoup(html, "html.parser")
+    title = clean_text(soup.title.get_text(" ", strip=True) if soup.title else "").lower()
+    body_text = clean_text(soup.get_text("\n", strip=True)).lower()
     return "404" in title or "404 not found" in body_text or "a kért oldal nem létezik" in body_text
 
 
-def extract_topic_title(driver: webdriver.Chrome, fallback: str) -> str:
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+def extract_topic_title_from_html(html: str, fallback: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
     for selector in ["meta[property='og:title']", "title", "h1"]:
         node = soup.select_one(selector)
         if not node:
@@ -343,25 +225,34 @@ def parse_comments_from_html(html: str) -> List[Tuple[str, str, str]]:
     return results
 
 
-def get_next_page_element(driver: webdriver.Chrome):
-    xpaths = [
-        "//a[@rel='next']",
-        "//a[contains(@title, 'Következő blokk')]",
-        "//li[contains(@class,'nav-arrow')]//a[@rel='next']",
-        "//a[contains(@href, '/hsz_') and (.//span[contains(@class,'fa-forward')] or .//span[contains(@class,'fa-step-forward')])]",
-    ]
-    for xpath in xpaths:
-        try:
-            elements = driver.find_elements(By.XPATH, xpath)
-        except Exception:
-            elements = []
+def get_next_page_url_from_html(html: str, current_url: str) -> Optional[str]:
+    soup = BeautifulSoup(html, "html.parser")
 
-        for el in elements:
-            try:
-                if el.is_displayed() and el.is_enabled():
-                    return el
-            except StaleElementReferenceException:
+    selectors = [
+        "a[rel='next']",
+        "a[title*='Következő blokk']",
+        "li.nav-arrow a[rel='next']",
+    ]
+
+    for selector in selectors:
+        a = soup.select_one(selector)
+        if a and a.get("href"):
+            return urljoin(current_url, a["href"])
+
+    current_range = parse_hsz_range_from_url(current_url)
+    if current_range:
+        cur_start, cur_end = current_range
+        for a in soup.select("a[href*='/hsz_']"):
+            href = a.get("href")
+            if not href:
                 continue
+            full = urljoin(current_url, href)
+            rng = parse_hsz_range_from_url(full)
+            if not rng:
+                continue
+            start, end = rng
+            if start < cur_start and end < cur_end:
+                return full
 
     return None
 
@@ -419,56 +310,6 @@ def build_fallback_next_hsz_url(current_url: str) -> Optional[str]:
         return None
 
     return build_hsz_url_with_range(current_url, new_start, new_end)
-
-
-def try_go_to_next_page(driver: webdriver.Chrome, delay: float) -> Optional[bool]:
-    old_url = driver.current_url
-
-    next_el = get_next_page_element(driver)
-    if next_el:
-        try:
-            next_href = next_el.get_attribute("href")
-        except Exception:
-            next_href = None
-
-        print(f"[DEBUG] Következő oldal gomb megvan. href={next_href}")
-
-        if safe_click(driver, next_el):
-            try:
-                WebDriverWait(driver, 20).until(lambda d: d.current_url != old_url)
-                wait_ready(driver)
-                time.sleep(3)
-                dismiss_known_popups(driver, first_page=False)
-                wait_for_messages(driver)
-                time.sleep(delay)
-                return True
-            except TimeoutException:
-                print("[DEBUG] Következő oldal gomb volt, de timeout lett az átmenetnél.")
-                return None
-        else:
-            print("[DEBUG] Megvolt a következő oldal gomb, de a kattintás nem sikerült.")
-
-    fallback_url = build_fallback_next_hsz_url(old_url)
-    if not fallback_url:
-        print("[DEBUG] Nincs következő gomb, és URL fallback sem készíthető.")
-        return False
-
-    print(f"[DEBUG] URL fallback próbálva: {fallback_url}")
-    try:
-        driver.get(fallback_url)
-        wait_ready(driver)
-        dismiss_known_popups(driver, first_page=False)
-        wait_for_messages(driver)
-        time.sleep(delay)
-        if driver.current_url != old_url:
-            return True
-        return False
-    except TimeoutException:
-        print("[DEBUG] URL fallback timeout.")
-        return None
-    except Exception as e:
-        print(f"[DEBUG] URL fallback hiba: {e}")
-        return None
 
 
 def ensure_output_dirs(base_output: Path) -> Tuple[Path, Path, Path]:
@@ -645,46 +486,80 @@ def resolve_resume_url(topic_url: str, topic_file: Path) -> str:
     return fixed_url
 
 
-def open_topic_start_page(driver: webdriver.Chrome, topic_url: str, topic_file: Path, delay: float) -> str:
+def open_topic_start_page(
+    session: requests.Session,
+    topic_url: str,
+    topic_file: Path,
+    delay: float,
+) -> Tuple[str, str]:
     start_url = resolve_resume_url(topic_url, topic_file)
     fresh_url = build_fresh_url_from_topic_url(topic_url)
 
     print(f"[DEBUG] Topic megnyitása: {start_url}")
-    driver.get(start_url)
-    wait_ready(driver)
-    dismiss_known_popups(driver, first_page=False)
-    time.sleep(delay)
+    final_url, html = fetch(session, start_url)
 
-    if is_404_page(driver) or not page_has_messages(driver):
+    if is_404_html(html) or not page_has_messages_html(html):
         if start_url != fresh_url:
             print(f"[DEBUG] A resume URL nem adott használható kommentoldalt, fallback friss.html-re: {fresh_url}")
-            driver.get(fresh_url)
-            wait_ready(driver)
-            dismiss_known_popups(driver, first_page=False)
-            time.sleep(delay)
+            final_url, html = fetch(session, fresh_url)
 
-    wait_for_messages(driver)
-    return driver.current_url
+    time.sleep(delay)
+    return final_url, html
+
+
+def try_go_to_next_page(
+    session: requests.Session,
+    current_url: str,
+    current_html: str,
+    delay: float,
+) -> Tuple[Optional[bool], Optional[str], Optional[str]]:
+    next_url = get_next_page_url_from_html(current_html, current_url)
+    if next_url:
+        print(f"[DEBUG] Következő oldal link megvan: {next_url}")
+        try:
+            final_url, html = fetch(session, next_url)
+            time.sleep(delay)
+            if final_url != current_url:
+                return True, final_url, html
+            return False, current_url, current_html
+        except Exception as e:
+            print(f"[DEBUG] Következő oldal letöltési hiba: {e}")
+            return None, None, None
+
+    fallback_url = build_fallback_next_hsz_url(current_url)
+    if not fallback_url:
+        print("[DEBUG] Nincs következő link, és URL fallback sem készíthető.")
+        return False, current_url, current_html
+
+    print(f"[DEBUG] URL fallback próbálva: {fallback_url}")
+    try:
+        final_url, html = fetch(session, fallback_url)
+        time.sleep(delay)
+        if final_url != current_url and page_has_messages_html(html):
+            return True, final_url, html
+        return False, current_url, current_html
+    except Exception as e:
+        print(f"[DEBUG] URL fallback hiba: {e}")
+        return None, None, None
 
 
 def scrape_topic_sequentially(
-    driver: webdriver.Chrome,
+    session: requests.Session,
     topic_title: str,
     topic_url: str,
     topic_file: Path,
     delay: float,
 ) -> Tuple[str, bool]:
-    opened_url = open_topic_start_page(driver, topic_url, topic_file, delay)
-    print(f"[DEBUG] Ténylegesen megnyitott kezdőoldal: {opened_url}")
+    current_url, html = open_topic_start_page(session, topic_url, topic_file, delay)
+    print(f"[DEBUG] Ténylegesen megnyitott kezdőoldal: {current_url}")
 
-    resolved_title = extract_topic_title(driver, topic_title)
+    resolved_title = extract_topic_title_from_html(html, topic_title)
     ensure_topic_metadata(topic_file, resolved_title, topic_url)
 
     visited_urls: Set[str] = set()
     page_index = 1
 
     while True:
-        current_url = driver.current_url
         if current_url in visited_urls:
             print(f"[DEBUG] Már feldolgozott oldal, leállás: {current_url}")
             return resolved_title, False
@@ -693,7 +568,7 @@ def scrape_topic_sequentially(
         current_range = parse_hsz_range_from_url(current_url)
 
         print(f"[DEBUG] Kommentoldal #{page_index}: {current_url}")
-        page_comments = parse_comments_from_html(driver.page_source)
+        page_comments = parse_comments_from_html(html)
 
         if current_range:
             append_page_and_range(topic_file, current_range, page_comments)
@@ -701,10 +576,12 @@ def scrape_topic_sequentially(
         else:
             print("[DEBUG] Ez a friss.html oldal, itt nincs számozott range, ezért ide nem kerül range sor.")
 
-        moved = try_go_to_next_page(driver, delay)
+        moved, next_url, next_html = try_go_to_next_page(session, current_url, html, delay)
 
         if moved is True:
             page_index += 1
+            current_url = next_url
+            html = next_html
             continue
 
         if moved is False:
@@ -713,89 +590,67 @@ def scrape_topic_sequentially(
             return resolved_title, True
 
         if moved is None:
-            print("[DEBUG] Timeout vagy navigációs hiba történt, a topic NEM kerül a visitedbe.")
+            print("[DEBUG] Letöltési vagy navigációs hiba történt, a topic NEM kerül a visitedbe.")
             return resolved_title, False
 
 
-def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: float, headless: bool) -> None:
+def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: float) -> None:
     base_output = Path(output_dir).expanduser().resolve()
     _, notebooks_dir, visited_file = ensure_output_dirs(base_output)
 
-    driver = setup_driver(headless=headless)
+    session = make_session()
     visited_topics = load_visited(visited_file)
-    first_list_page = True
 
-    try:
-        for offset in range(start_offset, end_offset + 1, 100):
-            list_url = build_list_url(offset)
-            print(f"\n[INFO] Listaoldal megnyitása: {list_url}")
+    for offset in range(start_offset, end_offset + 1, 100):
+        list_url = build_list_url(offset)
+        print(f"\n[INFO] Listaoldal megnyitása: {list_url}")
+
+        try:
+            final_url, html = fetch(session, list_url)
+            time.sleep(delay)
+        except Exception as e:
+            print(f"[WARN] Hiba a listaoldalnál: {list_url} | {e}")
+            continue
+
+        topics = parse_topic_links(html, final_url)
+        print(f"[INFO] Talált topicok száma: {len(topics)}")
+        if not topics:
+            continue
+
+        for idx, (topic_title, topic_url) in enumerate(topics, start=1):
+            if topic_url in visited_topics:
+                print(f"[INFO] ({idx}/{len(topics)}) Már feldolgozva, kihagyva: {topic_title}")
+                continue
+
+            topic_file = topic_file_path(notebooks_dir, topic_title)
+            print(f"\n[INFO] ({idx}/{len(topics)}) Topic: {topic_title}")
 
             try:
-                driver.get(list_url)
-                wait_ready(driver)
-                dismiss_known_popups(driver, first_page=first_list_page)
-                first_list_page = False
-                wait_for_topic_list(driver)
-                time.sleep(delay)
-            except TimeoutException:
-                print(f"[WARN] Timeout a listaoldalnál: {list_url}")
-                continue
+                resolved_title, finished = scrape_topic_sequentially(
+                    session, topic_title, topic_url, topic_file, delay
+                )
 
-            topics = parse_topic_links(driver.page_source, driver.current_url)
-            print(f"[INFO] Talált topicok száma: {len(topics)}")
-            if not topics:
-                continue
+                if sanitize_filename(resolved_title) != sanitize_filename(topic_title):
+                    new_path = topic_file_path(notebooks_dir, resolved_title)
+                    if new_path != topic_file and topic_file.exists():
+                        topic_file.replace(new_path)
+                        topic_file = new_path
 
-            for idx, (topic_title, topic_url) in enumerate(topics, start=1):
-                if topic_url in visited_topics:
-                    print(f"[INFO] ({idx}/{len(topics)}) Már feldolgozva, kihagyva: {topic_title}")
-                    continue
+                print(f"[INFO] Topic fájl: {topic_file}")
 
-                topic_file = topic_file_path(notebooks_dir, topic_title)
-                print(f"\n[INFO] ({idx}/{len(topics)}) Topic: {topic_title}")
+                if finished:
+                    append_visited(visited_file, topic_url)
+                    visited_topics.add(topic_url)
+                    print(f"[INFO] Topic teljesen feldolgozva, visitedbe írva: {resolved_title}")
+                else:
+                    print(f"[INFO] Topic nincs kész vagy hibával megállt, NEM kerül visitedbe: {resolved_title}")
 
-                try:
-                    resolved_title, finished = scrape_topic_sequentially(
-                        driver, topic_title, topic_url, topic_file, delay
-                    )
-
-                    if sanitize_filename(resolved_title) != sanitize_filename(topic_title):
-                        new_path = topic_file_path(notebooks_dir, resolved_title)
-                        if new_path != topic_file and topic_file.exists():
-                            topic_file.replace(new_path)
-                            topic_file = new_path
-
-                    print(f"[INFO] Topic fájl: {topic_file}")
-
-                    if finished:
-                        append_visited(visited_file, topic_url)
-                        visited_topics.add(topic_url)
-                        print(f"[INFO] Topic teljesen feldolgozva, visitedbe írva: {resolved_title}")
-                    else:
-                        print(f"[INFO] Topic nincs kész vagy hibával megállt, NEM kerül visitedbe: {resolved_title}")
-
-                except TimeoutException:
-                    print(f"[WARN] Timeout a topicnál: {topic_url}")
-                except WebDriverException as e:
-                    print(f"[WARN] Selenium hiba a topicnál: {topic_url} | {e}")
-                except Exception as e:
-                    print(f"[WARN] Váratlan hiba a topicnál: {topic_url} | {e}")
-
-                try:
-                    driver.get(list_url)
-                    wait_ready(driver)
-                    dismiss_known_popups(driver, first_page=False)
-                    wait_for_topic_list(driver)
-                    time.sleep(delay)
-                except Exception as e:
-                    print(f"[WARN] Nem sikerült visszamenni a listaoldalra: {e}")
-                    break
-    finally:
-        driver.quit()
+            except Exception as e:
+                print(f"[WARN] Váratlan hiba a topicnál: {topic_url} | {e}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="PROHARDVER notebook topic scraper Seleniummal.")
+    parser = argparse.ArgumentParser(description="PROHARDVER notebook topic scraper requests + BeautifulSoup alapon.")
     parser.add_argument("start_offset", type=int, help="Kezdő offset. Pl. 0 vagy 100")
     parser.add_argument("end_offset", type=int, help="Vég offset. Pl. 200 vagy 300")
     parser.add_argument(
@@ -804,7 +659,6 @@ def parse_args() -> argparse.Namespace:
         help="Kimeneti alapmappa. Ide jön létre a prohardver mappa. Alapértelmezett: aktuális mappa.",
     )
     parser.add_argument("--delay", type=float, default=1.2, help="Várakozás oldalak között másodpercben.")
-    parser.add_argument("--headless", action="store_true", help="Headless mód.")
     return parser.parse_args()
 
 
@@ -828,7 +682,6 @@ def main() -> None:
         end_offset=args.end_offset,
         output_dir=args.output,
         delay=args.delay,
-        headless=args.headless,
     )
 
 
