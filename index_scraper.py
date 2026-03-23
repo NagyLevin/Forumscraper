@@ -1159,3 +1159,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    #python index_scraper.py --output ./index --delay 1.5
