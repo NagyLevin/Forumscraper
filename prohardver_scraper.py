@@ -559,11 +559,14 @@ def remove_trailing_range_line(topic_file: Path) -> None:
     topic_file.write_text(text, encoding="utf-8")
 
 
-def append_page_and_range(
+def append_comments_block(
     topic_file: Path,
-    page_range: Tuple[int, int],
     comments: List[Tuple[str, str, str]],
+    page_range: Optional[Tuple[int, int]] = None,
 ) -> None:
+    if not comments and page_range is None:
+        return
+
     remove_trailing_range_line(topic_file)
 
     existing = topic_file.read_text(encoding="utf-8") if topic_file.exists() else ""
@@ -575,17 +578,27 @@ def append_page_and_range(
         block_lines.append(f"{author}: {comment}")
         block_lines.append("")
 
-    start, end = page_range
-
     parts = []
     if existing:
         parts.append(existing)
+
     if block_lines:
         parts.append("\n".join(block_lines).rstrip())
-    parts.append(f"{start}-{end}")
+
+    if page_range is not None:
+        start, end = page_range
+        parts.append(f"{start}-{end}")
 
     new_text = "\n\n".join(part for part in parts if part).rstrip() + "\n"
     topic_file.write_text(new_text, encoding="utf-8")
+
+
+def append_page_and_range(
+    topic_file: Path,
+    page_range: Tuple[int, int],
+    comments: List[Tuple[str, str, str]],
+) -> None:
+    append_comments_block(topic_file, comments, page_range=page_range)
 
 
 def finalize_topic_file(topic_file: Path, title: str, topic_url: str) -> None:
@@ -682,7 +695,8 @@ def scrape_topic_sequentially(
             append_page_and_range(topic_file, current_range, page_comments)
             print(f"[DEBUG] Oldal mentve, új utolsó sor: {current_range[0]}-{current_range[1]}")
         else:
-            print("[DEBUG] Ez a friss.html oldal, itt nincs számozott range, ezért ide nem kerül range sor.")
+            append_comments_block(topic_file, page_comments, page_range=None)
+            print("[DEBUG] Ez a friss.html oldal, a kommentek most már mentésre kerültek range sor nélkül.")
 
         moved = try_go_to_next_page(driver, delay)
 
