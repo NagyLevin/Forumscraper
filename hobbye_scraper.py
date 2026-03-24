@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import textwrap
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -341,9 +342,22 @@ def finalize_stream_json(topic_file: Path) -> None:
 # -----------------------------
 
 class BrowserFetcher:
-    def __init__(self, headless: bool = True, slow_mo: int = 0):
+    def __init__(
+        self,
+        headless: bool = True,
+        slow_mo: int = 0,
+        navigation_timeout_ms: int = 120000,
+        default_timeout_ms: int = 30000,
+        fetch_retries: int = 3,
+        retry_sleep_sec: float = 2.0,
+    ):
         self.headless = headless
         self.slow_mo = slow_mo
+        self.navigation_timeout_ms = navigation_timeout_ms
+        self.default_timeout_ms = default_timeout_ms
+        self.fetch_retries = max(1, fetch_retries)
+        self.retry_sleep_sec = max(0.0, retry_sleep_sec)
+
         self.playwright = None
         self.browser = None
         self.context = None
@@ -364,15 +378,11 @@ class BrowserFetcher:
             ),
             viewport={"width": 1600, "height": 2200},
         )
-        self.page = self.context.new_page()
+        self._new_page()
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        try:
-            if self.page:
-                self.page.close()
-        except Exception:
-            pass
+        self._close_page_safely()
         try:
             if self.context:
                 self.context.close()
@@ -388,6 +398,32 @@ class BrowserFetcher:
                 self.playwright.stop()
         except Exception:
             pass
+
+    def _new_page(self) -> None:
+        self._close_page_safely()
+        self.page = self.context.new_page()
+        self.page.set_default_navigation_timeout(self.navigation_timeout_ms)
+        self.page.set_default_timeout(self.default_timeout_ms)
+
+    def _close_page_safely(self) -> None:
+        if not self.page:
+            return
+
+        try:
+            try:
+                self.page.stop()
+            except Exception:
+                pass
+            self.page.close()
+        except Exception:
+            pass
+        finally:
+            self.page = None
+
+    def reset_page(self, reason: Optional[str] = None) -> None:
+        if reason:
+            print(f"[INFO] Playwright oldal reset: {reason}")
+        self._new_page()
 
     def accept_cookies_if_present(self) -> None:
         candidates = [
@@ -409,23 +445,65 @@ class BrowserFetcher:
                 pass
 
     def fetch(self, url: str, wait_ms: int = 1500) -> Tuple[str, str]:
-        print(f"[DEBUG] LETÖLTVE: {url}")
-        self.page.goto(url, wait_until="domcontentloaded", timeout=120000)
-        self.page.wait_for_timeout(wait_ms)
+        if not self.page:
+            self._new_page()
 
-        self.accept_cookies_if_present()
+        last_exc: Optional[Exception] = None
 
-        try:
-            self.page.wait_for_load_state("networkidle", timeout=5000)
-        except PlaywrightTimeoutError:
-            pass
+        for attempt in range(1, self.fetch_retries + 1):
+            try:
+                print(f"[DEBUG] Megnyitás indul ({attempt}/{self.fetch_retries}): {url}")
 
-        final_url = self.page.url
-        html = self.page.content()
+                try:
+                    self.page.stop()
+                except Exception:
+                    pass
 
-        print(f"[DEBUG] Végső URL: {final_url}")
-        print(f"[DEBUG] HTML első 400 karakter:\n{html[:400]}\n")
-        return final_url, html
+                response = self.page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                self.page.wait_for_timeout(wait_ms)
+
+                self.accept_cookies_if_present()
+
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
+                except PlaywrightTimeoutError:
+                    pass
+
+                final_url = self.page.url
+                html = self.page.content()
+                status = response.status if response is not None else None
+
+                if final_url.startswith("chrome-error://"):
+                    raise RuntimeError(f"chrome-error oldal jött vissza: {final_url}")
+
+                if not html or len(html) < 50:
+                    raise RuntimeError("üres vagy túl rövid HTML érkezett")
+
+                print(f"[DEBUG] LETÖLTVE: {url}")
+                print(f"[DEBUG] HTTP státusz: {status}")
+                print(f"[DEBUG] Végső URL: {final_url}")
+                print(f"[DEBUG] HTML első 400 karakter:\n{html[:400]}\n")
+                return final_url, html
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                last_exc = e
+                print(f"[WARN] Fetch hiba ({attempt}/{self.fetch_retries}): {url} | {e}")
+
+                if attempt < self.fetch_retries:
+                    self.reset_page(reason=f"fetch hiba után újrapróba: {url}")
+                    if self.retry_sleep_sec > 0:
+                        time.sleep(self.retry_sleep_sec)
+                else:
+                    self.reset_page(reason=f"fetch végleges hiba után page reset: {url}")
+
+        assert last_exc is not None
+        raise last_exc
 
 
 # -----------------------------
@@ -646,7 +724,6 @@ def extract_rating_and_likes_from_box(box: Tag, comment_id: Optional[str]) -> Tu
 
 
 def extract_header_node(box: Tag) -> Optional[Tag]:
-    # JAVÍTVA: A hiba forrása a "div.boxhp" elírás volt "div.boxph" helyett.
     for selector in ["div.boxph", "div.boxhp", "div.boxh", "div.boxhead"]:
         node = box.select_one(selector)
         if node:
@@ -668,14 +745,12 @@ def extract_date_from_header(header_node: Optional[Tag]) -> Optional[str]:
     if not header_node:
         return None
 
-    # 1) direkt táblacellákból
     for cell in header_node.select("table.fptbl th, table.fptbl td, th, td"):
         txt = clean_text(cell.get_text(" ", strip=True))
         found = try_extract_date_from_text(txt)
         if found:
             return found
 
-    # 2) nyers text node-okból
     for node in header_node.descendants:
         if isinstance(node, NavigableString):
             txt = clean_text(str(node))
@@ -683,13 +758,11 @@ def extract_date_from_header(header_node: Optional[Tag]) -> Optional[str]:
             if found:
                 return found
 
-    # 3) teljes fejléc plain text
     header_text = clean_text(header_node.get_text(" ", strip=True))
     found = try_extract_date_from_text(header_text)
     if found:
         return found
 
-    # 4) teljes fejléc HTML fallback
     header_html = str(header_node)
     found = try_extract_date_from_text(header_html)
     if found:
@@ -1145,8 +1218,11 @@ def scrape_main(
 
                 print(f"[INFO] Topic visitedbe írva: {topic_url_norm}")
 
+            except KeyboardInterrupt:
+                raise
             except Exception as e:
                 print(f"[WARN] Hiba topic feldolgozás közben: {topic_url} | {e}")
+                fetcher.reset_page(reason=f"topic hiba után reset: {topic_url}")
 
         processed_main_pages += 1
 
@@ -1179,6 +1255,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-page", type=int, default=1, help="A fórum főoldali lapozásának kezdő oldala (1-alapú).")
     parser.add_argument("--max-pages", type=int, default=None, help="Legfeljebb ennyi főoldali listázóoldalt dolgoz fel.")
     parser.add_argument("--headed", action="store_true", help="Látható böngészőablakkal fusson.")
+    parser.add_argument("--fetch-retries", type=int, default=3, help="Ennyiszer próbálja újra az oldal letöltését hiba esetén.")
+    parser.add_argument("--retry-sleep", type=float, default=2.0, help="Újrapróbálások közti várakozás másodpercben.")
+    parser.add_argument("--nav-timeout-ms", type=int, default=120000, help="Navigáció timeout ezredmásodpercben.")
+    parser.add_argument("--default-timeout-ms", type=int, default=30000, help="Általános Playwright timeout ezredmásodpercben.")
     return parser.parse_args()
 
 
@@ -1186,7 +1266,14 @@ def main() -> None:
     args = parse_args()
 
     try:
-        with BrowserFetcher(headless=not args.headed, slow_mo=50 if args.headed else 0) as fetcher:
+        with BrowserFetcher(
+            headless=not args.headed,
+            slow_mo=50 if args.headed else 0,
+            navigation_timeout_ms=args.nav_timeout_ms,
+            default_timeout_ms=args.default_timeout_ms,
+            fetch_retries=args.fetch_retries,
+            retry_sleep_sec=args.retry_sleep,
+        ) as fetcher:
             scrape_main(
                 fetcher=fetcher,
                 output_dir=args.output,
@@ -1205,4 +1292,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
     # python hobbye_scraper.py --output ./hobbielektronika --headed
