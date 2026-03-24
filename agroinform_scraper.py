@@ -10,6 +10,7 @@ import re
 import sys
 import textwrap
 import unicodedata
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -30,7 +31,6 @@ TOPIC_HREF_RE = re.compile(
 
 DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\b")
 PAGE_PAIR_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*$")
-COMMENT_COUNT_HEADER_RE = re.compile(r"(\d+)\s+hozzászólás", re.I)
 COMMENT_ID_RE = re.compile(r'"comment_id"\s*:\s*(?:"([^"]+)"|(\d+)|null)')
 COMMENT_URL_RE = re.compile(r'"url"\s*:\s*"([^"]+)"')
 
@@ -348,25 +348,13 @@ class BrowserFetcher:
         html = self.page.content()
         return final_url, html
 
-    def html(self) -> Tuple[str, str]:
-        try:
-            self.page.wait_for_load_state("networkidle", timeout=5000)
-        except PlaywrightTimeoutError:
-            pass
-        self.page.wait_for_timeout(800)
-        return self.page.url, self.page.content()
-
-    # --- KÖVETKEZŐ OLDAL TELJES, ABSZOLÚT URL-JÉNEK LEKÉRÉSE ---
     def get_next_page_url(self) -> Optional[str]:
-        """Kikeresi a 'Következő oldal' gombot és visszaadja a böngésző által generált natív ABSZOLÚT URL-t."""
         script = """
         () => {
             const nextLink = document.querySelector('a[title*="Következő oldal"], a[rel="next"]');
             if (nextLink) {
-                return nextLink.href; // A .href a böngésző által feloldott TELJES url-t adja vissza!
+                return nextLink.href; 
             }
-            
-            // Ha esetleg csak a képet találná meg
             const img = document.querySelector('img[alt="Következő"]');
             if (img && img.closest('a')) {
                 return img.closest('a').href;
@@ -429,12 +417,19 @@ class BrowserFetcher:
         script = """
 () => {
   const texts = [];
-  const nodes = Array.from(document.querySelectorAll('select option, select, a, span, div'));
-  for (const n of nodes) {
-    const t = ((n.innerText || n.textContent || '') + '').replace(/\\u00a0/g, ' ').trim();
-    if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) {
-      texts.push(t);
+  document.querySelectorAll('select').forEach(s => {
+    if (s.selectedIndex >= 0) {
+      const t = s.options[s.selectedIndex].text.replace(/\\u00a0/g, ' ').trim();
+      if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) texts.push(t);
     }
+  });
+  if (texts.length === 0) {
+    document.querySelectorAll('span, div, a, b, strong').forEach(n => {
+      if (n.children.length === 0) {
+        const t = (n.innerText || n.textContent || '').replace(/\\u00a0/g, ' ').trim();
+        if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) texts.push(t);
+      }
+    });
   }
   return Array.from(new Set(texts));
 }
@@ -466,12 +461,19 @@ class BrowserFetcher:
   }
 
   const pagePairs = [];
-  const nodes = Array.from(document.querySelectorAll('select option, select, a, span, div'));
-  for (const n of nodes) {
-    const t = ((n.innerText || n.textContent || '') + '').replace(/\\u00a0/g, ' ').trim();
-    if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) {
-      pagePairs.push(t);
+  document.querySelectorAll('select').forEach(s => {
+    if (s.selectedIndex >= 0) {
+      const t = s.options[s.selectedIndex].text.replace(/\\u00a0/g, ' ').trim();
+      if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) pagePairs.push(t);
     }
+  });
+  if (pagePairs.length === 0) {
+    document.querySelectorAll('span, div, a, b, strong').forEach(n => {
+      if (n.children.length === 0) {
+        const t = (n.innerText || n.textContent || '').replace(/\\u00a0/g, ' ').trim();
+        if (/^\\d+\\s*\\/\\s*\\d+$/.test(t)) pagePairs.push(t);
+      }
+    });
   }
 
   return {
@@ -864,15 +866,23 @@ def scrape_topic(
             total_downloaded += 1
             added_on_this_page += 1
 
+            # --- ÚJ DEBUG LOGOLÁS A KONZOLRA ---
+            author_log = c.get("author") or "ismeretlen"
+            date_log = c.get("date") or "ismeretlen dátum"
+            data_log = (c.get("data") or "").replace("\n", " ").strip()
+            if len(data_log) > 60:
+                data_log = data_log[:57] + "..."
+            
+            print(f"    [DEBUG] {author_log}({date_log}): {data_log}")
+            # -----------------------------------
+
         current_page_no = current_meta.get('detected_current_comment_page') or "?"
         total_pages_no = current_meta.get('detected_total_comment_pages') or "?"
         total_comm = current_meta.get('detected_total_comments') or "?"
         
         print(f"[INFO] Oldal kigyűjtve | Állás: {current_page_no}/{total_pages_no} oldal | Összes db az oldalon feltüntetve: {total_comm} | Eddig leszedve: {total_downloaded}")
 
-        # Tovább a következő URL-re, HA van Következő gomb!
         next_url = fetcher.get_next_page_url()
-        
         if not next_url:
             print(f"[INFO] Téma letöltése befejeződött, a 'Következő oldal' gomb fizikailag elfogyott az oldalon.")
             break
@@ -967,7 +977,6 @@ def scrape_main(
             topic_json_path = topic_file_path(topics_dir, topic_title)
 
             try:
-                # ITT MEGY BE A TÉMÁBA ÉS VÉGIGLAPOZZA!
                 total_downloaded = scrape_topic(
                     fetcher=fetcher,
                     topic_title=topic_title,
@@ -976,7 +985,6 @@ def scrape_main(
                     delay=delay,
                 )
 
-                # AMIKOR VÉGZETT AZ ÖSSZES OLDALLAL, CSAK AKKOR ÍRJA BE A VISITED-BE!
                 append_visited(visited_file, topic_url_norm)
                 visited_topics.add(topic_url_norm)
                 print(f"[SUCCESS] {topic_title} hozzáadva a visited listához!")
@@ -984,7 +992,6 @@ def scrape_main(
             except Exception as e:
                 print(f"[FATAL ERROR] Hiba a(z) '{topic_title}' feldolgozásánál: {e}")
 
-            # Mivel kijött a témából, a böngészőt vissza kell vinnünk a főoldal megfelelő pontjára
             fetcher.fetch(MAIN_FORUM_URL, wait_ms=int(delay * 1000))
             target_page = page_info.get("page_current") or 1
             current_page_no = 1
@@ -1005,7 +1012,6 @@ def scrape_main(
 
         processed_main_pages += 1
 
-        # Ugrás a következő FŐOLDALI listára
         next_url = fetcher.get_next_page_url()
         if not next_url:
             print("[INFO] Nincs több lapozható oldal a főoldalon. Befejezés.")
@@ -1075,5 +1081,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-                         # python agroinform_scraper.py --output ./agro --headed --start-page 1 --max-pages 1
+    main()                         # python agroinform_scraper.py --output ./agro --headed --start-page 1 --max-pages 1
