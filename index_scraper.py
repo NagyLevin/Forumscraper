@@ -377,14 +377,28 @@ def parse_votes_from_header_row(header_row: Optional[Tag]) -> Tuple[Optional[int
 
 
 class BrowserFetcher:
-    def __init__(self, headless: bool = True, slow_mo: int = 0):
+    def __init__(
+        self,
+        headless: bool = True,
+        slow_mo: int = 0,
+        timeout_ms: int = 90000,
+        retries: int = 4,
+        block_resources: bool = True,
+        auto_reset_fetches: int = 120,
+    ):
         self.headless = headless
         self.slow_mo = slow_mo
+        self.timeout_ms = timeout_ms
+        self.retries = retries
+        self.block_resources = block_resources
+        self.auto_reset_fetches = auto_reset_fetches
+
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
-        self.request_count = 0
+
+        self.fetch_counter = 0
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
@@ -392,24 +406,7 @@ class BrowserFetcher:
             headless=self.headless,
             slow_mo=self.slow_mo,
         )
-        self.context = self.browser.new_context(
-            locale="hu-HU",
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/136.0.0.0 Safari/537.36"
-            ),
-        )
-
-        def _route_handler(route):
-            req = route.request
-            if req.resource_type in {"image", "media", "font"}:
-                route.abort()
-            else:
-                route.continue_()
-
-        self.context.route("**/*", _route_handler)
-        self.page = self.context.new_page()
+        self._create_context_and_page()
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -434,15 +431,67 @@ class BrowserFetcher:
         except Exception:
             pass
 
-    def _reset_page_if_needed(self) -> None:
-        if self.request_count > 0 and self.request_count % 200 == 0:
-            print("[DEBUG] Page reset memória csökkentés miatt")
-            try:
+    def _create_context_and_page(self) -> None:
+        self.context = self.browser.new_context(
+            locale="hu-HU",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 2200},
+        )
+
+        if self.block_resources:
+            def route_handler(route):
+                try:
+                    req = route.request
+                    if req.resource_type in {"image", "media", "font"}:
+                        route.abort()
+                    else:
+                        route.continue_()
+                except Exception:
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+
+            self.context.route("**/*", route_handler)
+
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(self.timeout_ms)
+        self.page.set_default_navigation_timeout(self.timeout_ms)
+
+    def reset_page(self) -> None:
+        try:
+            if self.page:
                 self.page.close()
-            except Exception:
-                pass
-            self.page = self.context.new_page()
-            gc.collect()
+        except Exception:
+            pass
+
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(self.timeout_ms)
+        self.page.set_default_navigation_timeout(self.timeout_ms)
+        print("[INFO] Böngészőoldal újranyitva a stabilabb működéshez.")
+
+    def reset_context(self) -> None:
+        try:
+            if self.page:
+                self.page.close()
+        except Exception:
+            pass
+        self.page = None
+
+        try:
+            if self.context:
+                self.context.close()
+        except Exception:
+            pass
+        self.context = None
+
+        self._create_context_and_page()
+        gc.collect()
+        print("[INFO] Browser context teljesen újranyitva memória-kíméléshez.")
 
     def accept_cookies_if_present(self) -> None:
         candidates = [
@@ -466,25 +515,63 @@ class BrowserFetcher:
                 pass
 
     def fetch(self, url: str, wait_ms: int = 1200) -> Tuple[str, str]:
-        self._reset_page_if_needed()
-        self.request_count += 1
+        last_exc = None
 
-        print(f"[DEBUG] LETÖLTVE: {url}")
-        self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        self.page.wait_for_timeout(wait_ms)
+        if self.auto_reset_fetches > 0 and self.fetch_counter > 0 and self.fetch_counter % self.auto_reset_fetches == 0:
+            print("[INFO] Automatikus context-reset a fetch számláló alapján.")
+            self.reset_context()
 
-        self.accept_cookies_if_present()
+        for attempt in range(1, self.retries + 1):
+            try:
+                print(f"[DEBUG] LETÖLTVE ({attempt}/{self.retries}): {url}")
+                self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                self.page.wait_for_timeout(wait_ms)
 
-        try:
-            self.page.wait_for_load_state("networkidle", timeout=4000)
-        except PlaywrightTimeoutError:
-            pass
+                self.accept_cookies_if_present()
 
-        final_url = self.page.url
-        html = self.page.content()
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=4000)
+                except PlaywrightTimeoutError:
+                    pass
 
-        print(f"[DEBUG] Végső URL: {final_url}")
-        return final_url, html
+                final_url = self.page.url
+                html = self.page.content()
+
+                self.fetch_counter += 1
+                print(f"[DEBUG] Végső URL: {final_url}")
+                return final_url, html
+
+            except PlaywrightTimeoutError as e:
+                last_exc = e
+                print(f"[WARN] Timeout ({attempt}/{self.retries}) -> {url}")
+
+            except Exception as e:
+                last_exc = e
+                print(f"[WARN] Fetch hiba ({attempt}/{self.retries}) -> {url} | {e}")
+
+            if attempt < self.retries:
+                backoff_ms = 3000 * attempt
+                print(f"[WARN] Újrapróbálás {backoff_ms / 1000:.1f} mp múlva...")
+
+                try:
+                    self.page.wait_for_timeout(backoff_ms)
+                except Exception:
+                    pass
+
+                try:
+                    self.page.goto("about:blank", timeout=10000)
+                except Exception:
+                    pass
+
+                try:
+                    if attempt >= 2:
+                        self.reset_context()
+                    else:
+                        self.reset_page()
+                except Exception:
+                    pass
+
+        raise last_exc
 
 
 def parse_main_categories(html: str, page_url: str) -> List[Dict]:
@@ -899,6 +986,7 @@ def scrape_topic(
     topic_url: str,
     topic_file: Path,
     delay: float,
+    topic_reset_interval: int,
 ) -> Tuple[str, int, bool]:
     resume_source = None
     first_comment_already_written = False
@@ -920,6 +1008,8 @@ def scrape_topic(
         else:
             print("[INFO] Van meglévő félkész fájl, de nem találtam benne komment URL-t. Topic elejéről indul.")
 
+    fetcher.reset_context()
+
     print(f"[INFO] Topic megnyitása: {topic_title}")
     current_url, html = fetcher.fetch(topic_url, wait_ms=int(delay * 1000))
 
@@ -935,6 +1025,7 @@ def scrape_topic(
 
     page_no = start_page_no
     finished = False
+    topic_page_hops = 0
 
     while True:
         print(f"[INFO] Kommentoldal #{page_no}: {current_url}")
@@ -962,6 +1053,11 @@ def scrape_topic(
             finished = True
             break
 
+        topic_page_hops += 1
+        if topic_reset_interval > 0 and topic_page_hops % topic_reset_interval == 0:
+            print("[INFO] Hosszú topic közbeni memória-kímélő context reset.")
+            fetcher.reset_context()
+
         print(f"[INFO] Következő kommentoldal: {next_url}")
         current_url, html = fetcher.fetch(next_url, wait_ms=int(delay * 1000))
         page_no += 1
@@ -988,6 +1084,8 @@ def scrape_subforum(
     visited_file: Path,
     visited_topics: Set[str],
     delay: float,
+    topic_reset_interval: int,
+    subforum_reset_interval: int,
 ) -> None:
     category_dir = base_index_dir / sanitize_filename(category_title)
     subforum_dir = category_dir / sanitize_filename(subforum_title)
@@ -996,10 +1094,16 @@ def scrape_subforum(
     print(f"\n[INFO] Alforum indul: {category_title} -> {subforum_title}")
     print(f"[INFO] Alforum URL: {subforum_url}")
 
+    fetcher.reset_context()
+
     current_url = subforum_url
     page_no = 1
 
     while True:
+        if subforum_reset_interval > 0 and page_no > 1 and (page_no - 1) % subforum_reset_interval == 0:
+            print("[INFO] Alforum oldalak közbeni memória-kímélő context reset.")
+            fetcher.reset_context()
+
         print(f"\n[INFO] Topiclista oldal #{page_no}: {current_url}")
         final_url, html = fetcher.fetch(current_url, wait_ms=int(delay * 1000))
 
@@ -1035,6 +1139,7 @@ def scrape_subforum(
                     topic_url=topic_url,
                     topic_file=initial_path,
                     delay=delay,
+                    topic_reset_interval=topic_reset_interval,
                 )
 
                 final_path = topic_file_path(subforum_dir, resolved_title)
@@ -1075,6 +1180,8 @@ def scrape_main(
     delay: float,
     only_category: Optional[str],
     only_subforum: Optional[str],
+    topic_reset_interval: int,
+    subforum_reset_interval: int,
 ) -> None:
     base_output = Path(output_dir).expanduser().resolve()
     index_dir = ensure_dirs(base_output)
@@ -1122,6 +1229,8 @@ def scrape_main(
                     visited_file=visited_file,
                     visited_topics=visited_topics,
                     delay=delay,
+                    topic_reset_interval=topic_reset_interval,
+                    subforum_reset_interval=subforum_reset_interval,
                 )
             except Exception as e:
                 print(f"[WARN] Hiba alforum feldolgozás közben: {subforum_url} | {e}")
@@ -1159,6 +1268,36 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Látható böngészőablakkal fut.",
     )
+    parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=90000,
+        help="Navigációs timeout ezredmásodpercben.",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=4,
+        help="Ennyiszer próbálja újra a fetch műveleteket.",
+    )
+    parser.add_argument(
+        "--auto-reset-fetches",
+        type=int,
+        default=120,
+        help="Ennyi fetch után automatikus context reset.",
+    )
+    parser.add_argument(
+        "--topic-reset-interval",
+        type=int,
+        default=25,
+        help="Ennyi kommentoldalanként teljes context reset hosszú topicoknál.",
+    )
+    parser.add_argument(
+        "--subforum-reset-interval",
+        type=int,
+        default=20,
+        help="Ennyi topiclista oldalanként teljes context reset alforumon belül.",
+    )
     return parser.parse_args()
 
 
@@ -1166,13 +1305,22 @@ def main() -> None:
     args = parse_args()
 
     try:
-        with BrowserFetcher(headless=not args.headed, slow_mo=50 if args.headed else 0) as fetcher:
+        with BrowserFetcher(
+            headless=not args.headed,
+            slow_mo=50 if args.headed else 0,
+            timeout_ms=args.timeout_ms,
+            retries=args.retries,
+            block_resources=True,
+            auto_reset_fetches=args.auto_reset_fetches,
+        ) as fetcher:
             scrape_main(
                 fetcher=fetcher,
                 output_dir=args.output,
                 delay=args.delay,
                 only_category=args.only_category,
                 only_subforum=args.only_subforum,
+                topic_reset_interval=args.topic_reset_interval,
+                subforum_reset_interval=args.subforum_reset_interval,
             )
     except KeyboardInterrupt:
         print("\n[INFO] Megszakítva felhasználó által.")
@@ -1184,5 +1332,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
-    #python index_scraper.py --output ./index --delay 1.5
+
+    # python index_scraper.py --output ./index --delay 1.5
