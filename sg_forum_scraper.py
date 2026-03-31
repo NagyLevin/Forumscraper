@@ -569,6 +569,97 @@ class BrowserFetcher:
         gc.collect()
         print("[INFO] Browser context újranyitva memória-kíméléshez.")
 
+    def ensure_page_alive(self) -> None:
+        if self.browser is None:
+            raise RuntimeError("A böngésző nincs inicializálva.")
+
+        if self.context is None:
+            self._create_context_and_page()
+            return
+
+        try:
+            if self.page is None or self.page.is_closed():
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(self.timeout_ms)
+                self.page.set_default_navigation_timeout(self.timeout_ms)
+        except Exception:
+            self.reset_context()
+
+    def _try_click_selector(self, selector: str, timeout: int = 1200) -> bool:
+        try:
+            locator = self.page.locator(selector).first
+            if locator.is_visible(timeout=timeout):
+                locator.click(timeout=2500, force=True)
+                self.page.wait_for_timeout(600)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def dismiss_overlays_if_present(self) -> bool:
+        clicked_any = False
+
+        close_selectors = [
+            "button[aria-label='Close']",
+            "button[aria-label='Bezárás']",
+            "button[title='Bezárás']",
+            "button[title='Close']",
+            "button:has-text('×')",
+            "button:has-text('✕')",
+            "button:has-text('✖')",
+            "button:has-text('x')",
+            "button:has-text('X')",
+            "[role='dialog'] button",
+            "div[role='dialog'] button",
+        ]
+
+        reject_selectors = [
+            "button:has-text('ÖSSZES ELUTASÍTÁSA')",
+            "button:has-text('Összes elutasítása')",
+            "button:has-text('ELUTASÍTÁS')",
+            "button:has-text('Elutasítás')",
+            "button:has-text('Reject all')",
+            "button:has-text('REJECT ALL')",
+        ]
+
+        accept_selectors = [
+            "button:has-text('ÖSSZES ELFOGADÁSA')",
+            "button:has-text('Összes elfogadása')",
+            "button:has-text('ELFOGADOM')",
+            "button:has-text('Elfogadom')",
+            "button:has-text('Accept all')",
+            "button:has-text('ACCEPT ALL')",
+        ]
+
+        for selector in reject_selectors:
+            if self._try_click_selector(selector):
+                #print("[INFO] Overlay/cookie ablak bezárva: elutasítás gomb.")
+                clicked_any = True
+                break
+
+        if not clicked_any:
+            for selector in close_selectors:
+                if self._try_click_selector(selector):
+                    #print("[INFO] Overlay/cookie ablak bezárva: X/close gomb.")
+                    clicked_any = True
+                    break
+
+        if not clicked_any:
+            for selector in accept_selectors:
+                if self._try_click_selector(selector):
+                    #print("[INFO] Overlay/cookie ablak bezárva: elfogadás gomb.")
+                    clicked_any = True
+                    break
+
+        if clicked_any:
+            try:
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(300)
+            except Exception:
+                pass
+
+        return clicked_any
+
     def accept_cookies_if_present(self) -> None:
         candidates = [
             "button:has-text('Elfogadom')",
@@ -577,12 +668,14 @@ class BrowserFetcher:
             "button:has-text('OK')",
             "text=Elfogadom",
             "text=ELFOGADOM",
+            "button:has-text('ÖSSZES ELUTASÍTÁSA')",
+            "button:has-text('ÖSSZES ELFOGADÁSA')",
         ]
         for selector in candidates:
             try:
                 locator = self.page.locator(selector).first
                 if locator.is_visible(timeout=1200):
-                    locator.click(timeout=2500)
+                    locator.click(timeout=2500, force=True)
                     self.page.wait_for_timeout(1200)
                     return
             except Exception:
@@ -597,16 +690,34 @@ class BrowserFetcher:
 
         for attempt in range(1, self.retries + 1):
             try:
+                self.ensure_page_alive()
+
                 print(f"[DEBUG] LETÖLTVE ({attempt}/{self.retries}): {url}")
                 self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 self.page.wait_for_timeout(wait_ms)
+
+                self.dismiss_overlays_if_present()
                 self.accept_cookies_if_present()
+
                 try:
                     self.page.wait_for_load_state("networkidle", timeout=5000)
                 except PlaywrightTimeoutError:
                     pass
+
+                for _ in range(3):
+                    changed = self.dismiss_overlays_if_present()
+                    self.accept_cookies_if_present()
+                    try:
+                        self.page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    if not changed:
+                        break
+                    self.page.wait_for_timeout(600)
+
                 final_url = self.page.url
                 html = self.page.content()
+
                 self.fetch_counter += 1
                 return final_url, html
 
@@ -618,6 +729,14 @@ class BrowserFetcher:
                 last_exc = e
                 print(f"[WARN] Fetch hiba ({attempt}/{self.retries}) -> {url} | {e}")
 
+                msg = str(e).lower()
+                if "target page, context or browser has been closed" in msg or "has been closed" in msg:
+                    try:
+                        print("[WARN] A page/context bezáródott, context újranyitása...")
+                        self.reset_context()
+                    except Exception:
+                        pass
+
             if attempt < self.retries:
                 backoff_ms = 3000 * attempt
                 print(f"[WARN] Újrapróbálás {backoff_ms / 1000:.1f} mp múlva...")
@@ -626,13 +745,12 @@ class BrowserFetcher:
                 except Exception:
                     pass
                 try:
-                    self.page.goto("about:blank", timeout=10000)
-                except Exception:
-                    pass
-                try:
                     self.reset_page()
                 except Exception:
-                    pass
+                    try:
+                        self.reset_context()
+                    except Exception:
+                        pass
 
         raise last_exc
 
@@ -798,8 +916,8 @@ def parse_categories_from_forum_main(html: str, page_url: str) -> List[CategoryI
 def find_topics_section_container(soup: BeautifulSoup) -> Optional[Tag]:
     headers = soup.select("h1, h2, h3")
     for h in headers:
-        title = clean_text(h.get_text(" ", strip=True))
-        if title.lower() == "a fórum témái":
+        title = clean_text(h.get_text(" ", strip=True)).lower()
+        if title == "a fórum témái":
             parent = h.parent
             while parent:
                 if parent.name == "div":
@@ -823,6 +941,65 @@ def parse_category_title_from_page(html: str, fallback: str) -> str:
     return fallback
 
 
+def is_probably_bad_topic_anchor(a: Tag) -> bool:
+    txt = clean_text(a.get_text(" ", strip=True))
+    href = (a.get("href") or "").strip()
+
+    if not txt:
+        return True
+
+    if txt in {"Előző", "Következő", "← Előző", "Következő →", "←", "→"}:
+        return True
+
+    if not TOPIC_PATH_RE.search(href):
+        return True
+
+    for parent in a.parents:
+        if not isinstance(parent, Tag):
+            continue
+
+        if parent.name in {"header", "footer", "nav", "aside"}:
+            return True
+
+        cls = " ".join(parent.get("class", []))
+        if any(bad in cls.lower() for bad in ["pagination", "cookie", "consent", "dialog", "modal"]):
+            return True
+
+    return False
+
+
+def collect_fallback_topic_anchors(soup: BeautifulSoup) -> List[Tag]:
+    results: List[Tag] = []
+    seen = set()
+
+    roots = []
+
+    main_tag = soup.select_one("main")
+    if main_tag:
+        roots.append(main_tag)
+
+    roots.extend(soup.select("div.flex-1, div.min-w-0"))
+
+    if not roots:
+        roots = [soup]
+
+    for root in roots:
+        for a in root.select("a[href]"):
+            href = (a.get("href") or "").strip()
+            txt = clean_text(a.get_text(" ", strip=True))
+
+            if is_probably_bad_topic_anchor(a):
+                continue
+
+            key = (href, txt)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(a)
+
+    return results
+
+
 def parse_topics_from_category_page(
     html: str,
     page_url: str,
@@ -835,13 +1012,20 @@ def parse_topics_from_category_page(
     seen: Set[str] = set()
 
     topics_container = find_topics_section_container(soup)
-    if not topics_container:
-        print("[WARN] Nem találtam 'A fórum témái' blokkot.")
-        del soup
-        gc.collect()
-        return results
+    candidate_anchors: List[Tag] = []
 
-    for a in topics_container.select("a[href]"):
+    if topics_container is not None:
+        candidate_anchors = [
+            a for a in topics_container.select("a[href]")
+            if (a.get("href") or "").strip() and TOPIC_PATH_RE.search((a.get("href") or "").strip())
+        ]
+        print(f"[DEBUG] Topic anchorok az 'A fórum témái' blokkból: {len(candidate_anchors)}")
+    else:
+        print("[WARN] Nem találtam 'A fórum témái' blokkot, fallback keresés indul az oldalon.")
+        candidate_anchors = collect_fallback_topic_anchors(soup)
+        print(f"[DEBUG] Topic anchorok fallback kereséssel: {len(candidate_anchors)}")
+
+    for a in candidate_anchors:
         href = (a.get("href") or "").strip()
         if not href or not TOPIC_PATH_RE.search(href):
             continue
@@ -884,6 +1068,8 @@ def parse_topics_from_category_page(
                     if "db" in line.lower():
                         continue
                     if re.search(r"\d{1,2}:\d{2}", line):
+                        continue
+                    if len(line) > 60:
                         continue
                     last_user = line
                     break
@@ -1109,12 +1295,12 @@ def parse_comments_from_topic_page(html: str, topic_page_url: str) -> List[Dict]
             "url": comment_url,
             "data": body,
         }
-
+        '''
         print(
             f"[DEBUG] Komment #{idx} | id={comment_id or '-'} | szerző={item['author']} | "
             f"dátum={date_text or '-'} | preview={short_preview(body, 100)}"
         )
-
+        '''
         results.append(item)
 
     del soup
@@ -1154,7 +1340,7 @@ def comment_to_output_item(c: Dict) -> Dict:
 
 
 # --------------------------------------------------
-# Topic scrape - javított resume logika
+# Topic scrape
 # --------------------------------------------------
 
 def scrape_topic(
@@ -1166,7 +1352,6 @@ def scrape_topic(
 ) -> int:
     fetcher.reset_context()
 
-    # 1) Mindig nyissuk meg először a témát, hogy biztos topic címet kapjunk.
     initial_url = normalize_topic_url_for_visited(topic.topic_url)
     print(f"[INFO] Téma megnyitása: {topic.topic_title} | URL: {initial_url}")
     current_url, html = fetcher.fetch(initial_url, wait_ms=int(delay * 1000))
@@ -1177,7 +1362,6 @@ def scrape_topic(
     else:
         topic.topic_title = cleanup_topic_title_for_filename(topic.topic_title)
 
-    # 2) A végleges fájlnév csak EZUTÁN áll össze.
     topic_file = topic_file_path_by_parts(
         data_dir=data_dir,
         section_title=topic.section_title,
@@ -1186,7 +1370,6 @@ def scrape_topic(
     )
     ensure_parent_dir(topic_file)
 
-    # 3) Ha már van fájl, akkor abból az utolsó komment URL-jéről folytatunk.
     existing_comments = 0
     resume_after_comment_id = None
     resume_url = None
@@ -1236,11 +1419,7 @@ def scrape_topic(
     while True:
         current_page_no, total_pages, next_url = parse_topic_pagination_info(html, current_url)
 
-        print(
-            f"[INFO] Téma: {topic.topic_title} | kommentoldal: {current_page_no}"
-            + (f" / {total_pages}" if total_pages else "")
-            + f" | URL: {current_url}"
-        )
+        
 
         page_comments = parse_comments_from_topic_page(html, current_url)
 
@@ -1320,9 +1499,13 @@ def scrape_topic(
         if next_page_no <= current_page_no:
             print("[INFO] A következő kommentoldal száma nem nagyobb, megállok.")
             break
-
+        print(
+            f"[INFO] Téma: {topic.topic_title} | kommentoldal: {current_page_no}"
+            + (f" / {total_pages}" if total_pages else "")
+            + f" | URL: {current_url}"
+        )
         print(f"[INFO] Következő kommentoldal száma: {next_page_no}")
-
+       
         page_hops += 1
         if topic_reset_interval > 0 and page_hops % topic_reset_interval == 0:
             print("[INFO] Hosszú téma közbeni context reset.")
@@ -1386,6 +1569,7 @@ def scrape_category(
             category.category_title = resolved_category_title
 
         current_page_no, total_pages, next_url = parse_category_pagination_info(html, current_url)
+
         print(
             f"[INFO] Témacsoport oldal: {category.category_title} | oldal: {current_page_no}"
             + (f" / {total_pages}" if total_pages else "")
@@ -1400,7 +1584,7 @@ def scrape_category(
             category_url=category.category_url,
         )
 
-        print(f"[INFO] Talált témák az 'A fórum témái' blokkban: {len(topics)}")
+        print(f"[INFO] Talált témák az oldalon: {len(topics)}")
 
         if not topics:
             print("[WARN] Nem találtam témákat ezen az oldalon.")
@@ -1430,6 +1614,12 @@ def scrape_category(
                 )
 
                 print(f"[INFO] Téma kész: {topic.topic_title} | letöltött hozzászólások: {total_downloaded}")
+                print(
+                    f"[INFO] Témacsoport oldal: {category.category_title} | oldal: {current_page_no}"
+                    + (f" / {total_pages}" if total_pages else "")
+                    + f" | URL: {current_url}"
+                )
+                print(f"\n[INFO] ({idx}/{len(topics)}) Téma: {topic.topic_title}")
 
                 append_visited(visited_topics_file, topic_key)
                 visited_topics.add(topic_key)
@@ -1628,6 +1818,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-#python sg_forum_scraper.py --output ./SG --headed
-#python sg_forum_scraper.py --output ./SG --headed --only-category "Általános eszmecsere"
-#python sg_forum_scraper.py --output ./SG --headed --only-topic "Garfield képregény"
+
+# python sg_forum_scraper.py --output ./SG --headed
+# python sg_forum_scraper.py --output ./SG --headed --only-category "Általános eszmecsere"
+# python sg_forum_scraper.py --output ./SG --headed --only-topic "Garfield képregény"
