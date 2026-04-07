@@ -672,12 +672,42 @@ def extract_comment_id(block: Tag) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def extract_author_from_profile_elements(block: Tag) -> str:
+    user_link = block.select_one('a[href*="/felhasznalo/"]')
+    if not user_link:
+        return "ismeretlen"
+
+    candidates: List[str] = []
+
+    title_attr = clean_text(user_link.get("title") or "")
+    if title_attr:
+        candidates.append(title_attr)
+
+    img = user_link.find("img")
+    if img:
+        img_alt = clean_text(img.get("alt") or "")
+        if img_alt:
+            candidates.append(img_alt)
+
+    link_text = clean_text(user_link.get_text(" ", strip=True))
+    if link_text:
+        candidates.append(link_text)
+
+    for candidate in candidates:
+        if candidate and candidate != "?" and len(candidate) <= 80:
+            return candidate
+
+    return "ismeretlen"
+
+
 def extract_author_date_header(block: Tag) -> Tuple[str, Optional[str]]:
     text = block.get_text("\n", strip=True)
     lines = [clean_text(x) for x in text.splitlines() if clean_text(x)]
+
     author = "ismeretlen"
     date_text = None
 
+    # 1) Régi módszer: először a szöveges sorokból próbáljuk kinyerni
     for line in lines[:6]:
         m = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2}\.?\s*\d{1,2}:\d{2})", line)
         if m:
@@ -685,6 +715,21 @@ def extract_author_date_header(block: Tag) -> Tuple[str, Optional[str]]:
             break
         if len(line) < 40 and not line.startswith('#') and author == "ismeretlen":
             author = line
+
+    # 2) Ha a régi módszer nem talált értelmes szerzőt, fallback:
+    #    profillink title / img alt / link text
+    if author == "ismeretlen":
+        fallback_author = extract_author_from_profile_elements(block)
+        if fallback_author != "ismeretlen":
+            author = fallback_author
+
+    # 3) Ha még dátum sincs, nézzük át kicsit bővebben
+    if date_text is None:
+        for line in lines[:12]:
+            m = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2}\.?\s*\d{1,2}:\d{2})", line)
+            if m:
+                date_text = m.group(1)
+                break
 
     return author, date_text
 
@@ -1045,3 +1090,4 @@ if __name__ == "__main__":
 # python sg_forum_scraper.py --output ./SG --headed
 # python sg_forum_scraper.py --output ./SG --headed --only-category "Általános eszmecsere"
 # python sg_forum_scraper.py --output ./SG --headed --only-topic "Garfield képregény"
+#python sg_forum_scraper.py --output ./SG --preview --delay 3
