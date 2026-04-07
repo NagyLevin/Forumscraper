@@ -166,6 +166,15 @@ def short_preview(text: str, max_len: int = 120) -> str:
     return txt[: max_len - 3].rstrip() + "..."
 
 
+def extract_html_head(html: str) -> str:
+    if not html:
+        return ""
+    m = re.search(r"<head\b[^>]*>.*?</head>", html, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(0).strip()
+    return ""
+
+
 def normalize_topic_url_for_visited(url: str) -> str:
     url = strip_fragment(url)
     return remove_query_param(url, "page")
@@ -707,7 +716,6 @@ def extract_author_date_header(block: Tag) -> Tuple[str, Optional[str]]:
     author = "ismeretlen"
     date_text = None
 
-    # 1) Régi módszer: először a szöveges sorokból próbáljuk kinyerni
     for line in lines[:6]:
         m = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2}\.?\s*\d{1,2}:\d{2})", line)
         if m:
@@ -716,14 +724,11 @@ def extract_author_date_header(block: Tag) -> Tuple[str, Optional[str]]:
         if len(line) < 40 and not line.startswith('#') and author == "ismeretlen":
             author = line
 
-    # 2) Ha a régi módszer nem talált értelmes szerzőt, fallback:
-    #    profillink title / img alt / link text
     if author == "ismeretlen":
         fallback_author = extract_author_from_profile_elements(block)
         if fallback_author != "ismeretlen":
             author = fallback_author
 
-    # 3) Ha még dátum sincs, nézzük át kicsit bővebben
     if date_text is None:
         for line in lines[:12]:
             m = re.search(r"(\d{4}\.\s*\d{2}\.\s*\d{2}\.?\s*\d{1,2}:\d{2})", line)
@@ -1009,6 +1014,7 @@ def scrape_forum(
     only_topic: Optional[str],
     topic_reset_interval: int,
     preview: bool,
+    debug_head: bool,
 ) -> None:
     paths = ensure_dirs(Path(output_dir).expanduser().resolve())
     visited_topics = {normalize_topic_url_for_visited(x) for x in load_visited(paths["visited_topics"])}
@@ -1016,6 +1022,15 @@ def scrape_forum(
 
     print(f"[INFO] Fő fórum megnyitása: {FORUM_URL}")
     final_url, html = fetcher.fetch(FORUM_URL, wait_ms=int(delay * 1000))
+
+    if debug_head:
+        head_html = extract_html_head(html)
+        print("\n[DEBUG] --- HTML <head> kezdete ---")
+        if head_html:
+            print(head_html)
+        else:
+            print("[DEBUG] Nem találtam <head> részt a letöltött HTML-ben.")
+        print("[DEBUG] --- HTML <head> vége ---\n")
 
     categories = parse_categories_from_forum_main(html, final_url)
     print(f"[INFO] Talált feldolgozandó témacsoportok: {len(categories)}")
@@ -1056,6 +1071,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topic-reset-interval", type=int, default=25, help="Context reset intervallum.")
     parser.add_argument("--auto-reset-fetches", type=int, default=120, help="Automatikus reset (fetch count).")
     parser.add_argument("--preview", action="store_true", help="Komment preview kiírása.")
+    parser.add_argument("--debug-head", action="store_true", help="Kiírja a fő fórumoldal HTML head részét.")
     return parser.parse_args()
 
 
@@ -1078,6 +1094,7 @@ def main() -> None:
                 args.only_topic,
                 args.topic_reset_interval,
                 args.preview,
+                args.debug_head,
             )
     except KeyboardInterrupt:
         print("\n[INFO] Megszakítva.")

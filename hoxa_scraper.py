@@ -33,6 +33,14 @@ COMMENT_URL_RE = re.compile(r'"url"\s*:\s*"([^"]+)"')
 
 
 # -----------------------------
+# Kivételek
+# -----------------------------
+
+class CaptchaDetectedError(RuntimeError):
+    pass
+
+
+# -----------------------------
 # Általános segédfüggvények
 # -----------------------------
 
@@ -164,6 +172,73 @@ def build_main_page_url(page_no: int) -> str:
 
 def parse_comment_page_number_from_comment_url(url: str) -> int:
     return get_topic_page_number(url)
+
+
+def page_looks_like_captcha(html: str, url: Optional[str] = None) -> bool:
+    html_low = (html or "").lower()
+
+    if not html_low.strip():
+        return False
+
+    direct_markers = [
+        "<title>captcha",
+        '"title": "captcha!"',
+        ">captcha!<",
+        "captcha!",
+        "captcha",
+        "cloudflare",
+        "cf-challenge",
+        "challenge-platform",
+        "/cdn-cgi/challenge-platform/",
+        "g-recaptcha",
+        "h-captcha",
+        "recaptcha",
+        "verify you are human",
+        "ellenőrizze, hogy ember",
+        "igazolja, hogy nem robot",
+        "nem vagy robot",
+    ]
+    if any(marker in html_low for marker in direct_markers):
+        return True
+
+    soup = BeautifulSoup(html, "html.parser")
+    try:
+        title_text = ""
+        if soup.title:
+            title_text = clean_text(soup.title.get_text(" ", strip=True)).lower()
+
+        body_text = clean_text(soup.get_text(" ", strip=True)).lower()
+
+        if "captcha" in title_text:
+            return True
+
+        text_markers = [
+            "captcha",
+            "nem vagy robot",
+            "igazolja, hogy nem robot",
+            "verify you are human",
+            "are you human",
+            "robot vagy",
+            "cloudflare",
+            "security check",
+        ]
+        if any(marker in body_text for marker in text_markers):
+            return True
+
+        if url:
+            normalized_url = normalize_hoxa_url(url).lower()
+            if "captcha" in normalized_url:
+                return True
+
+        return False
+    finally:
+        del soup
+        gc.collect()
+
+
+def ensure_not_captcha(html: str, url: Optional[str] = None) -> None:
+    if page_looks_like_captcha(html, url):
+        raise CaptchaDetectedError(f"CAPTCHA detected at: {url or 'unknown url'}")
 
 
 # -----------------------------
@@ -578,8 +653,13 @@ class BrowserFetcher:
                     pass
                 final_url = self.page.url
                 html = self.page.content()
+
+                ensure_not_captcha(html, final_url)
+
                 self.fetch_counter += 1
                 return final_url, html
+            except CaptchaDetectedError:
+                raise
             except PlaywrightTimeoutError as e:
                 last_exc = e
                 print(f"[WARN] Timeout ({attempt}/{self.retries}) -> {url}")
@@ -1255,6 +1335,8 @@ def scrape_main(
                 print(f"[INFO] Topic mentve: {topic_json_path}")
                 print(f"[INFO] Topic visitedbe írva: {topic_url_norm}")
 
+            except CaptchaDetectedError:
+                raise
             except Exception as e:
                 print(f"[WARN] Hiba topic feldolgozás közben: {topic_url} | {e}")
 
@@ -1386,6 +1468,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] Megszakítva felhasználó által.")
         sys.exit(1)
+    except CaptchaDetectedError:
+        print("[FATAL] CAPTCHA detected, stopping.")
+        sys.exit(2)
     except Exception as e:
         print(f"[FATAL] Végzetes hiba: {e}")
         sys.exit(1)
@@ -1394,8 +1479,8 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-#python3 hoxa_scraper.py --output ./hoxa    
-#python3 hoxa_scraper.py --output ./hoxa --start-page 1 --end-page 10 --max-pages 10 --headed #max pages 10 felesleges
-#python3 hoxa_scraper.py --output ./hoxa --only-title "segély" --headed
-#python3 hoxa_scraper.py --output ./hoxa --start-page 3 --max-pages 5 --headed
-#python3 hoxa_scraper.py --output ./hoxa --start-page 1 --end-page 10 --headed
+# python3 hoxa_scraper.py --output ./hoxa
+# python3 hoxa_scraper.py --output ./hoxa --start-page 1 --end-page 10 --max-pages 10 --headed
+# python3 hoxa_scraper.py --output ./hoxa --only-title "segély" --headed
+# python3 hoxa_scraper.py --output ./hoxa --start-page 3 --max-pages 5 --headed
+# python3 hoxa_scraper.py --output ./hoxa --start-page 1 --end-page 10 --headed
