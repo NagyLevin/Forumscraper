@@ -255,6 +255,23 @@ def page_has_messages(driver: webdriver.Chrome) -> bool:
         return False
 
 
+def page_has_no_results(driver: webdriver.Chrome) -> bool:
+    try:
+        elems = driver.find_elements(By.CSS_SELECTOR, "li.list-message")
+        for elem in elems:
+            txt = clean_text(elem.text).lower()
+            if "nincs találat" in txt:
+                return True
+    except Exception:
+        pass
+
+    try:
+        body_text = clean_text(driver.find_element(By.TAG_NAME, "body").text).lower()
+        return "nincs találat" in body_text
+    except Exception:
+        return False
+
+
 def is_404_page(driver: webdriver.Chrome) -> bool:
     title = clean_text(driver.title).lower()
     body_text = clean_text(driver.find_element(By.TAG_NAME, "body").text).lower()
@@ -527,54 +544,118 @@ def build_fallback_next_hsz_url(current_url: str) -> Optional[str]:
     return build_hsz_url_with_range(current_url, new_start, new_end)
 
 
-def try_go_to_next_page(driver: webdriver.Chrome, delay: float) -> Optional[bool]:
+def load_candidate_comment_page(
+    driver: webdriver.Chrome,
+    target_url: str,
+    delay: float,
+) -> str:
+    """
+    Visszatérési értékek:
+    - "messages": normál kommentoldal
+    - "empty": hibás/üres oldal, pl. 'Nincs találat.'
+    - "404": nem létező oldal
+    - "unknown": betöltött valami, de se komment, se egyértelmű üres állapot
+    """
+    print(f"[DEBUG] Céloldal megnyitása közvetlenül: {target_url}")
+    driver.get(target_url)
+    wait_ready(driver)
+    dismiss_known_popups(driver, first_page=False)
+    time.sleep(delay)
+
+    if is_404_page(driver):
+        return "404"
+
+    if page_has_messages(driver):
+        return "messages"
+
+    if page_has_no_results(driver):
+        return "empty"
+
+    try:
+        wait_for_messages(driver, timeout=3)
+        if page_has_messages(driver):
+            return "messages"
+    except TimeoutException:
+        pass
+
+    if page_has_no_results(driver):
+        return "empty"
+
+    return "unknown"
+
+
+def try_go_to_next_page(driver: webdriver.Chrome, delay: float, max_empty_skips: int = 15) -> Optional[bool]:
     old_url = driver.current_url
+    next_href = get_next_page_href(driver)
 
-    next_el = get_next_page_element(driver)
-    if next_el:
-        try:
-            next_href = next_el.get_attribute("href")
-        except Exception:
-            next_href = None
+    if not next_href:
+        next_href = build_fallback_next_hsz_url(old_url)
+        if next_href:
+            next_href = next_href.split("#")[0]
 
-        print(f"[DEBUG] Következő oldal gomb megvan. href={next_href}")
-
-        if safe_click(driver, next_el):
-            try:
-                WebDriverWait(driver, 20).until(lambda d: d.current_url != old_url)
-                wait_ready(driver)
-                time.sleep(3)
-                dismiss_known_popups(driver, first_page=False)
-                wait_for_messages(driver)
-                time.sleep(delay)
-                return True
-            except TimeoutException:
-                print("[DEBUG] Következő oldal gomb volt, de timeout lett az átmenetnél.")
-                return None
-        else:
-            print("[DEBUG] Megvolt a következő oldal gomb, de a kattintás nem sikerült.")
-
-    fallback_url = build_fallback_next_hsz_url(old_url)
-    if not fallback_url:
+    if not next_href:
         print("[DEBUG] Nincs következő gomb, és URL fallback sem készíthető.")
         return False
 
-    print(f"[DEBUG] URL fallback próbálva: {fallback_url}")
-    try:
-        driver.get(fallback_url)
-        wait_ready(driver)
-        dismiss_known_popups(driver, first_page=False)
-        wait_for_messages(driver)
-        time.sleep(delay)
-        if driver.current_url != old_url:
+    attempted_urls: Set[str] = set()
+    empty_skip_count = 0
+    candidate_url = next_href
+
+    while candidate_url:
+        candidate_url = candidate_url.split("#")[0]
+
+        if candidate_url in attempted_urls:
+            print(f"[DEBUG] Ugyanazt a candidate URL-t újra kaptam, leállás: {candidate_url}")
+            return False
+        attempted_urls.add(candidate_url)
+
+        state = None
+        try:
+            state = load_candidate_comment_page(driver, candidate_url, delay)
+        except TimeoutException:
+            print(f"[DEBUG] Timeout a candidate oldal betöltésekor: {candidate_url}")
+            state = "unknown"
+        except Exception as e:
+            print(f"[DEBUG] Hiba a candidate oldal betöltésekor: {candidate_url} | {e}")
+            state = "unknown"
+
+        if state == "messages":
+            print(f"[DEBUG] Sikeres továbblépés kommentoldalra: {driver.current_url}")
             return True
-        return False
-    except TimeoutException:
-        print("[DEBUG] URL fallback timeout.")
+
+        if state == "404":
+            print(f"[DEBUG] A candidate oldal 404-es, további lap már nincs: {candidate_url}")
+            return False
+
+        if state == "empty":
+            empty_skip_count += 1
+            print(
+                f"[DEBUG] Üres/hibás köztes oldal kihagyva ('Nincs találat.'): "
+                f"{candidate_url} | skip #{empty_skip_count}"
+            )
+            if empty_skip_count >= max_empty_skips:
+                print("[DEBUG] Túl sok egymás utáni üres oldal, leállás.")
+                return False
+
+            next_from_here = get_next_page_href(driver)
+            if not next_from_here:
+                next_from_here = build_fallback_next_hsz_url(driver.current_url)
+                if next_from_here:
+                    next_from_here = next_from_here.split("#")[0]
+
+            candidate_url = next_from_here
+            continue
+
+        print(f"[DEBUG] Nem egyértelmű állapot a candidate oldalon, megpróbálom URL-fallbackgel: {candidate_url}")
+        fallback_url = build_fallback_next_hsz_url(candidate_url)
+        if fallback_url:
+            candidate_url = fallback_url.split("#")[0]
+            continue
+
+        print("[DEBUG] Nem találtam további fallback oldalt.")
         return None
-    except Exception as e:
-        print(f"[DEBUG] URL fallback hiba: {e}")
-        return None
+
+    return False
 
 
 def ensure_output_dirs(base_output: Path) -> Tuple[Path, Path, Path]:
@@ -640,9 +721,6 @@ def file_looks_closed_json(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
 
-    # Először próbáljuk rendesen beolvasni a teljes JSON-t.
-    # Ez a legmegbízhatóbb, és megszünteti azt a hibát, hogy nagy fájloknál
-    # a marker már nincs az utolsó 512 KB-ban.
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -669,7 +747,6 @@ def file_looks_closed_json(path: Path) -> bool:
     except Exception:
         pass
 
-    # Ha valamiért nem sikerült parse-olni, legyen egy lazább fallback.
     tail = read_tail_text(path, max_bytes=256 * 1024).rstrip()
     if not tail.endswith("}"):
         return False
@@ -896,7 +973,7 @@ def open_topic_start_page(driver: webdriver.Chrome, topic_url: str, topic_file: 
     dismiss_known_popups(driver, first_page=False)
     time.sleep(delay)
 
-    if is_404_page(driver) or not page_has_messages(driver):
+    if is_404_page(driver) or (not page_has_messages(driver) and not page_has_no_results(driver)):
         if start_url != fresh_url:
             print(f"[DEBUG] A resume URL nem adott használható kommentoldalt, fallback friss.html-re: {fresh_url}")
             driver.get(fresh_url)
@@ -905,7 +982,15 @@ def open_topic_start_page(driver: webdriver.Chrome, topic_url: str, topic_file: 
             time.sleep(delay)
             resume_source = "fallback_to_fresh"
 
-    wait_for_messages(driver)
+    if page_has_no_results(driver):
+        print("[DEBUG] A kezdő/resume oldal üres ('Nincs találat.'), megpróbálok továbblépni egy valódi kommentoldalra.")
+        moved = try_go_to_next_page(driver, delay)
+        if moved is not True:
+            raise TimeoutException("A resume oldal üres volt, és nem találtam használható következő kommentoldalt.")
+
+    if not page_has_messages(driver):
+        wait_for_messages(driver)
+
     return driver.current_url, resume_source, False
 
 

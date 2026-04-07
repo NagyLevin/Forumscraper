@@ -332,7 +332,6 @@ def finalize_stream_json(topic_file: Path) -> None:
 # -----------------------------
 # Playwright wrapper
 # -----------------------------
-
 class BrowserFetcher:
     def __init__(
         self,
@@ -340,15 +339,15 @@ class BrowserFetcher:
         slow_mo: int = 0,
         timeout_ms: int = 90000,
         retries: int = 4,
-        block_resources: bool = True,
         auto_reset_fetches: int = 120,
+        block_resources: bool = True,
     ):
         self.headless = headless
         self.slow_mo = slow_mo
         self.timeout_ms = timeout_ms
         self.retries = retries
-        self.block_resources = block_resources
         self.auto_reset_fetches = auto_reset_fetches
+        self.block_resources = block_resources
 
         self.playwright = None
         self.browser = None
@@ -444,9 +443,11 @@ class BrowserFetcher:
     def ensure_page_alive(self) -> None:
         if self.browser is None:
             raise RuntimeError("A böngésző nincs inicializálva.")
+
         if self.context is None:
             self._create_context_and_page()
             return
+
         try:
             if self.page is None or self.page.is_closed():
                 self.page = self.context.new_page()
@@ -455,77 +456,30 @@ class BrowserFetcher:
         except Exception:
             self.reset_context()
 
-    def _try_click_button_by_text(self, label: str, timeout: int = 1500) -> bool:
-        candidates = [
-            self.page.get_by_role("button", name=label).first,
-            self.page.locator(f"button:has-text('{label}')").first,
-            self.page.locator(f"text={label}").first,
-        ]
-        for locator in candidates:
-            try:
-                if locator.count() > 0 and locator.is_visible(timeout=timeout):
-                    locator.scroll_into_view_if_needed(timeout=timeout)
-                    locator.click(timeout=2500, force=True)
-                    self.page.wait_for_timeout(800)
-                    return True
-            except Exception:
-                pass
-        return False
-
-    def dismiss_overlays_if_present(self) -> bool:
-        reject_texts = [
-            "ÖSSZES ELUTASÍTÁSA",
-            "Összes elutasítása",
-            "ELUTASÍTÁS",
-            "Elutasítás",
-            "Reject all",
-            "REJECT ALL",
-        ]
-        close_selectors = [
-            "button:has-text('×')",
-            "button:has-text('✕')",
-            "button[aria-label='Close']",
-            "button[aria-label='Bezárás']",
-        ]
-        accept_texts = [
-            "ÖSSZES ELFOGADÁSA",
-            "Összes elfogadása",
-            "Elfogadom",
-            "ELFOGADOM",
-            "Accept all",
+    def reject_cookie_popup_if_present(self) -> bool:
+        selectors = [
+            "button:has-text('ÖSSZES ELUTASÍTÁSA')",
+            "button:has-text('Összes elutasítása')",
+            "text=ÖSSZES ELUTASÍTÁSA",
+            "text=Összes elutasítása",
         ]
 
-        for _ in range(6):
+        for _ in range(4):
             try:
-                self.page.wait_for_timeout(350)
-            except Exception:
-                pass
-            try:
-                self.page.mouse.wheel(0, 500)
+                self.page.wait_for_timeout(400)
             except Exception:
                 pass
 
-            for txt in reject_texts:
-                if self._try_click_button_by_text(txt):
-                    print("[INFO] Cookie popup elutasítva.")
-                    return True
-
-            for sel in close_selectors:
+            for selector in selectors:
                 try:
-                    locator = self.page.locator(sel).first
+                    locator = self.page.locator(selector).first
                     if locator.count() > 0 and locator.is_visible(timeout=1200):
-                        locator.scroll_into_view_if_needed(timeout=1200)
                         locator.click(timeout=2500, force=True)
-                        self.page.wait_for_timeout(600)
-                        print("[INFO] Overlay bezárva.")
+                        self.page.wait_for_timeout(900)
+                        print("[INFO] Cookie popup elutasítva.")
                         return True
                 except Exception:
                     pass
-
-            for txt in accept_texts:
-                if self._try_click_button_by_text(txt):
-                    print("[INFO] Cookie popup elfogadva.")
-                    return True
 
             try:
                 self.page.keyboard.press("Escape")
@@ -534,70 +488,77 @@ class BrowserFetcher:
 
         return False
 
+    def close_overlay_if_present(self) -> bool:
+        selectors = [
+            "button[aria-label='Close']",
+            "button[aria-label='Bezárás']",
+            "button[title='Bezárás']",
+            "button[title='Close']",
+            "button:has-text('×')",
+            "button:has-text('✕')",
+            "button:has-text('✖')",
+        ]
+
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector).first
+                if locator.count() > 0 and locator.is_visible(timeout=800):
+                    locator.click(timeout=2000, force=True)
+                    self.page.wait_for_timeout(500)
+                    print("[INFO] Overlay bezárva.")
+                    return True
+            except Exception:
+                pass
+        return False
+
     def accept_cookies_if_present(self) -> None:
-        for txt in ["Elfogadom", "ELFOGADOM", "OK", "Rendben"]:
-            if self._try_click_button_by_text(txt, timeout=800):
-                return
+        return
 
     def fetch(self, url: str, wait_ms: int = 1500) -> Tuple[str, str]:
         last_exc = None
 
         if self.auto_reset_fetches > 0 and self.fetch_counter > 0 and self.fetch_counter % self.auto_reset_fetches == 0:
-            print("[INFO] Automatikus context reset.")
+            print("[INFO] Automatikus context reset fetch számláló alapján.")
             self.reset_context()
-
-        expected_topic = "/forum/tema/" in url
-        expected_category = "/forum/temak/" in url
 
         for attempt in range(1, self.retries + 1):
             try:
                 self.ensure_page_alive()
-
-                print(f"[DEBUG] LETÖLTVE ({attempt}/{self.retries}): {url}")
+                print(f"[DEBUG] LETÖLTÉS ({attempt}/{self.retries}): {url}")
                 self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 self.page.wait_for_timeout(wait_ms)
 
-                for _ in range(5):
-                    changed = self.dismiss_overlays_if_present()
-                    self.accept_cookies_if_present()
-                    if not changed:
-                        break
+                self.reject_cookie_popup_if_present()
 
                 try:
                     self.page.wait_for_load_state("networkidle", timeout=5000)
                 except PlaywrightTimeoutError:
                     pass
 
-                final_url = self.page.url
-                if expected_category and "/forum/tema/" in final_url:
-                    print(f"[WARN] Váratlan topic oldal jött vissza kategória helyett, újrapróbálom: {final_url}")
-                    self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                    self.page.wait_for_timeout(wait_ms)
-                    for _ in range(3):
-                        changed = self.dismiss_overlays_if_present()
-                        self.accept_cookies_if_present()
-                        if not changed:
-                            break
-                    final_url = self.page.url
-                elif expected_topic and "/forum/temak/" in final_url:
-                    print(f"[WARN] Váratlan kategóriaoldal jött vissza topic helyett, újrapróbálom: {final_url}")
-                    self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                    self.page.wait_for_timeout(wait_ms)
-                    final_url = self.page.url
+                self.reject_cookie_popup_if_present()
+                self.close_overlay_if_present()
 
-                html = self.page.content()
                 self.fetch_counter += 1
-                return final_url, html
-
+                return self.page.url, self.page.content()
+            except PlaywrightTimeoutError as e:
+                last_exc = e
+                print(f"[WARN] Timeout: {url}")
             except Exception as e:
                 last_exc = e
-                print(f"[WARN] Fetch hiba ({attempt}/{self.retries}) -> {url} | {e}")
-                if attempt < self.retries:
+                print(f"[WARN] Fetch hiba: {url} | {e}")
+
+            if attempt < self.retries:
+                backoff_ms = 3000 * attempt
+                try:
+                    self.page.wait_for_timeout(backoff_ms)
+                except Exception:
+                    pass
+                try:
+                    self.reset_page()
+                except Exception:
                     self.reset_context()
 
         raise last_exc
-
-
 # -----------------------------
 # Főoldal parsing
 # -----------------------------
