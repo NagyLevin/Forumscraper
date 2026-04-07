@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -641,17 +640,46 @@ def file_looks_closed_json(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
 
-    tail = read_tail_text(path, max_bytes=65536).rstrip()
+    # Először próbáljuk rendesen beolvasni a teljes JSON-t.
+    # Ez a legmegbízhatóbb, és megszünteti azt a hibát, hogy nagy fájloknál
+    # a marker már nincs az utolsó 512 KB-ban.
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            return False
+
+        if data.get("origin") != "prohardver_forum":
+            return False
+
+        extra = data.get("extra")
+        if not isinstance(extra, dict):
+            return False
+
+        if extra.get("scrape_status") != "finished":
+            return False
+
+        comments = data.get("comments")
+        if not isinstance(comments, list):
+            return False
+
+        return True
+
+    except Exception:
+        pass
+
+    # Ha valamiért nem sikerült parse-olni, legyen egy lazább fallback.
+    tail = read_tail_text(path, max_bytes=256 * 1024).rstrip()
     if not tail.endswith("}"):
         return False
 
     required_markers = [
-        '"comments": [',
         '"origin": "prohardver_forum"',
         '"scrape_status": "finished"',
+        '"date_modified":',
     ]
-    full_sample = read_tail_text(path, max_bytes=512 * 1024)
-    return all(marker in tail or marker in full_sample for marker in required_markers)
+    return all(marker in tail for marker in required_markers)
 
 
 def file_has_any_saved_comment(path: Path) -> bool:
@@ -1075,3 +1103,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+    #python prohardver_scraper.py 0 6000 --output . --delay 3 --headless
