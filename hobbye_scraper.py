@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -27,6 +26,15 @@ TOPIC_LINK_HINT_RE = re.compile(r"/forum/", re.IGNORECASE)
 
 MONTH_RE = r"(?:Jan|Feb|Már|Mar|Apr|Ápr|Máj|May|Jún|Jun|Júl|Jul|Aug|Szept|Sep|Okt|Oct|Nov|Dec)"
 DATE_RE = re.compile(rf"\b{MONTH_RE}\s+\d{{1,2}},\s+\d{{4}}\b", re.IGNORECASE)
+
+
+# -----------------------------
+# Egyedi kivételek
+# -----------------------------
+
+class ExcessiveLoadPolicyError(RuntimeError):
+    """A szerver túlterheltségi policy oldalt adott vissza; a scrapernek le kell állnia."""
+    pass
 
 
 # -----------------------------
@@ -193,6 +201,20 @@ def parse_topic_displayed_page_info(html: str, current_url: str) -> Tuple[int, O
         return url_page, None
 
     return 1, None
+
+
+def html_indicates_excessive_load_policy(html: str) -> bool:
+    if not html:
+        return False
+
+    html_l = html.lower()
+    phrases = [
+        "sorry, you cannot access this network segment because of excessive load policy",
+        "excessive load policy",
+        "cannot access this network segment",
+    ]
+
+    return any(p in html_l for p in phrases)
 
 
 # -----------------------------
@@ -485,9 +507,17 @@ class BrowserFetcher:
                 print(f"[DEBUG] HTTP státusz: {status}")
                 print(f"[DEBUG] Végső URL: {final_url}")
                 print(f"[DEBUG] HTML első 400 karakter:\n{html[:400]}\n")
+
+                if html_indicates_excessive_load_policy(html):
+                    raise ExcessiveLoadPolicyError(
+                        f"A szerver excessive load policy oldalt adott vissza: {final_url}"
+                    )
+
                 return final_url, html
 
             except KeyboardInterrupt:
+                raise
+            except ExcessiveLoadPolicyError:
                 raise
             except Exception as e:
                 last_exc = e
@@ -1218,6 +1248,8 @@ def scrape_main(
 
             except KeyboardInterrupt:
                 raise
+            except ExcessiveLoadPolicyError:
+                raise
             except Exception as e:
                 print(f"[WARN] Hiba topic feldolgozás közben: {topic_url} | {e}")
                 fetcher.reset_page(reason=f"topic hiba után reset: {topic_url}")
@@ -1283,6 +1315,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] Megszakítva felhasználó által.")
         sys.exit(1)
+    except ExcessiveLoadPolicyError as e:
+        print(f"[FATAL] A scraper leállt, mert a szerver túlterheltségi tiltóoldalt adott vissza: {e}")
+        sys.exit(2)
     except Exception as e:
         print(f"[FATAL] Végzetes hiba: {e}")
         sys.exit(1)
@@ -1290,5 +1325,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
+
     # python hobbye_scraper.py --output ./hobbielektronika --headed
