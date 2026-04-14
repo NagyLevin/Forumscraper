@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import re
 import sys
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup, Tag
@@ -20,6 +22,9 @@ from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://www.jofogas.hu"
 DEFAULT_LIST_URL = "https://www.jofogas.hu/magyarorszag/muszaki-cikkek-elektronika"
+
+AD_ID_RE = re.compile(r'"ad_id"\s*:\s*"([^"]+)"')
+AD_URL_RE = re.compile(r'"url"\s*:\s*"([^"]+)"')
 
 
 # --------------------------------------------------
@@ -123,6 +128,30 @@ def normalize_ad_url(url: str) -> str:
     return strip_fragment(url)
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+def split_name_like_person(name: str) -> Dict[str, str]:
+    name = clean_text(name)
+    if not name:
+        return {"name": ""}
+
+    parts = name.split()
+    if len(parts) >= 2:
+        return {"family": parts[0], "given": " ".join(parts[1:])}
+    return {"name": name}
+
+
+def extract_ad_id_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not path:
+        return ""
+    last = path.split("/")[-1]
+    return clean_text(last)
+
+
 # --------------------------------------------------
 # Adatmodellek
 # --------------------------------------------------
@@ -146,11 +175,13 @@ class AdDetails:
 # Állapot / output
 # --------------------------------------------------
 
-def ensure_dirs(base_output: Path) -> dict:
+def ensure_dirs(base_output: Path) -> Dict[str, Path]:
     root = base_output / "jofogas"
+    topics_dir = root / "topics"
     state_dir = root / "state"
 
     root.mkdir(parents=True, exist_ok=True)
+    topics_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
     visited_ads = state_dir / "visited_ads.txt"
@@ -159,6 +190,7 @@ def ensure_dirs(base_output: Path) -> dict:
 
     return {
         "root": root,
+        "topics": topics_dir,
         "state": state_dir,
         "visited_ads": visited_ads,
     }
@@ -179,15 +211,172 @@ def append_visited(path: Path, value: str) -> None:
         f.write(value.strip() + "\n")
 
 
-def append_ad_to_txt(path: Path, ad: AdDetails) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write("[\n")
-        f.write(f"Hirdetescim: {ad.title}\n")
-        f.write(f"Datum: {ad.date}\n")
-        f.write(f"Elado: {ad.seller}\n")
-        f.write("Leíras:\n")
-        f.write(ad.description.rstrip() + "\n")
-        f.write("]\n\n")
+def topic_file_path(topics_dir: Path, topic_name: str) -> Path:
+    return topics_dir / f"{sanitize_filename(topic_name)}.json"
+
+
+def is_stream_json_finalized(topic_file: Path) -> bool:
+    if not topic_file.exists():
+        return False
+
+    try:
+        with topic_file.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            read_size = min(size, 512)
+            f.seek(max(0, size - read_size))
+            tail = f.read().decode("utf-8", errors="ignore").strip()
+        return tail.endswith("]\n}") or tail.endswith("]\r\n}") or tail.endswith("]}")
+    except Exception:
+        return False
+
+
+def count_existing_ads_in_stream_file(topic_file: Path) -> int:
+    if not topic_file.exists():
+        return 0
+
+    count = 0
+    with topic_file.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            count += line.count('"ad_id":')
+    return count
+
+
+def get_last_written_ad_info(topic_file: Path) -> Tuple[Optional[str], Optional[str], int]:
+    if not topic_file.exists():
+        return None, None, 0
+
+    existing_count = count_existing_ads_in_stream_file(topic_file)
+
+    try:
+        with topic_file.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            read_size = min(size, 1024 * 1024)
+            f.seek(max(0, size - read_size))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return None, None, existing_count
+
+    ad_ids = AD_ID_RE.findall(tail)
+    urls = AD_URL_RE.findall(tail)
+
+    last_ad_id = ad_ids[-1] if ad_ids else None
+    last_ad_url = urls[-1] if urls else None
+
+    return last_ad_id, last_ad_url, existing_count
+
+
+def reopen_finalized_stream_json_for_append(topic_file: Path) -> None:
+    if not topic_file.exists():
+        return
+
+    content = topic_file.read_text(encoding="utf-8", errors="ignore")
+    stripped = content.rstrip()
+
+    suffixes = [
+        "\n  ]\n}\n",
+        "\n  ]\n}",
+        "\n  ]\r\n}",
+        "\n  ]\r\n}\r\n",
+        "]}",
+    ]
+
+    for suffix in suffixes:
+        if stripped.endswith(suffix.strip()):
+            new_content = stripped
+            if new_content.endswith("]}"):
+                new_content = new_content[:-2]
+            elif new_content.endswith("]\n}"):
+                new_content = new_content[:-3]
+            elif new_content.endswith("]\r\n}"):
+                new_content = new_content[:-4]
+            else:
+                new_content = re.sub(r"\n\s*\]\s*\}\s*$", "", new_content, flags=re.S)
+
+            topic_file.write_text(new_content.rstrip() + "\n", encoding="utf-8")
+            return
+
+    # fallback
+    new_content = re.sub(r"\n\s*\]\s*\}\s*$", "", content.rstrip(), flags=re.S)
+    topic_file.write_text(new_content.rstrip() + "\n", encoding="utf-8")
+
+
+def write_topic_stream_header(
+    topic_file: Path,
+    resolved_title: str,
+    topic_url: str,
+    start_page: int,
+    end_page: Optional[int],
+) -> None:
+    header_obj = {
+        "title": resolved_title,
+        "authors": [],
+        "data": {
+            "content": resolved_title,
+            "likes": None,
+            "dislikes": None,
+            "score": None,
+            "rating": None,
+            "date": None,
+            "url": strip_fragment(topic_url),
+            "language": "hu",
+            "tags": [],
+            "rights": "Jófogás hirdetés tartalom",
+            "date_modified": now_iso(),
+            "extra": {
+                "start_page": start_page,
+                "end_page": end_page,
+            },
+            "origin": "jofogas",
+        },
+        "origin": "jofogas",
+    }
+
+    header_json = json.dumps(header_obj, ensure_ascii=False, indent=2)
+    if not header_json.endswith("}"):
+        raise RuntimeError("Hibás header JSON generálás.")
+
+    text = header_json[:-1] + ',\n  "ads": [\n'
+    topic_file.write_text(text, encoding="utf-8")
+
+
+def append_ad_to_stream_file(topic_file: Path, ad_item: Dict, has_existing_ads: bool) -> None:
+    item_json = json.dumps(ad_item, ensure_ascii=False, indent=2)
+    item_json = "\n".join("    " + line if line.strip() else line for line in item_json.splitlines())
+
+    with topic_file.open("a", encoding="utf-8") as f:
+        if has_existing_ads:
+            f.write(",\n")
+        f.write(item_json)
+
+
+def finalize_stream_json(topic_file: Path) -> None:
+    if is_stream_json_finalized(topic_file):
+        return
+    with topic_file.open("a", encoding="utf-8") as f:
+        f.write("\n  ]\n}\n")
+
+
+def ad_to_output_item(ad: AdDetails) -> Dict:
+    seller_name = ad.seller or "ismeretlen eladó"
+    return {
+        "title": ad.title,
+        "authors": [split_name_like_person(seller_name)] if seller_name else [],
+        "data": ad.description,
+        "likes": None,
+        "dislikes": None,
+        "score": None,
+        "rating": None,
+        "date": ad.date,
+        "url": ad.url,
+        "language": "hu",
+        "tags": [],
+        "extra": {
+            "seller": ad.seller,
+            "ad_id": extract_ad_id_from_url(ad.url),
+        },
+    }
 
 
 # --------------------------------------------------
@@ -369,7 +558,6 @@ class BrowserFetcher:
 def parse_total_pages(html: str) -> Optional[int]:
     soup = BeautifulSoup(html, "html.parser")
 
-    # Képek alapján pagination gombok aria-label-je pl. "2607. oldalra"
     nums: List[int] = []
 
     for btn in soup.select("button[aria-label]"):
@@ -384,7 +572,6 @@ def parse_total_pages(html: str) -> Optional[int]:
     if nums:
         return max(nums)
 
-    # fallback: oldal szövegből
     text = clean_text(soup.get_text(" ", strip=True))
     candidates = re.findall(r"\b\d{2,5}\b", text)
     parsed = []
@@ -404,12 +591,9 @@ def parse_ad_cards(html: str, page_url: str) -> List[AdCard]:
     results: List[AdCard] = []
     seen: Set[str] = set()
 
-    # A screenshotok alapján a releváns kártyák:
-    # div[data-testid="ad-card-general"] és benne <a href=...> + h5 cím
     cards = soup.select('div[data-testid="ad-card-general"]')
 
     if not cards:
-        # fallback
         cards = soup.select('a[href*="/magyarorszag/"][href*="_"]')
 
     for card in cards:
@@ -466,9 +650,6 @@ def extract_title(soup: BeautifulSoup) -> str:
 
 
 def extract_date(soup: BeautifulSoup) -> str:
-    # A screenshot alapján:
-    # <p ...>Feladás dátuma:</p>
-    # <span ...>ápr 6., 10:49</span>
     for p in soup.select("p, span, div"):
         txt = clean_text(p.get_text(" ", strip=True))
         if txt.lower() == "feladás dátuma:":
@@ -480,13 +661,8 @@ def extract_date(soup: BeautifulSoup) -> str:
                     if val and "feladás dátuma" not in val.lower():
                         return val
 
-    # fallback: regex a teljes oldal szövegéből
     text = clean_text(soup.get_text("\n", strip=True))
-    m = re.search(
-        r"Feladás dátuma:\s*([^\n]+)",
-        text,
-        flags=re.I
-    )
+    m = re.search(r"Feladás dátuma:\s*([^\n]+)", text, flags=re.I)
     if m:
         return clean_text(m.group(1))
 
@@ -505,7 +681,6 @@ def extract_seller(soup: BeautifulSoup) -> str:
             if txt:
                 return txt
 
-    # fallback a kontakt szekcióból
     text = clean_text(soup.get_text("\n", strip=True))
     m = re.search(r"Kapcsolatfelvétel a Hirdetővel.*?\n([^\n]+)", text, flags=re.I | re.S)
     if m:
@@ -517,13 +692,10 @@ def extract_seller(soup: BeautifulSoup) -> str:
 
 
 def extract_description(soup: BeautifulSoup) -> str:
-    # A screenshot alapján a leírás egy p elemben van, sok <br> taggel.
-    # Megkeressük a "Leírás" címkét, és az utána következő blokkot.
     header_candidates = soup.find_all(["h2", "h3", "div", "span", "p"])
     for hdr in header_candidates:
         txt = clean_text(hdr.get_text(" ", strip=True))
         if txt.lower() == "leírás":
-            # próbáljuk a következő nagyobb blokkot kinyerni
             nxt = hdr.find_next(["div", "p"])
             hops = 0
             while nxt and hops < 8:
@@ -533,7 +705,6 @@ def extract_description(soup: BeautifulSoup) -> str:
                     return block_text
                 nxt = nxt.find_next(["div", "p"])
 
-    # screenshot alapján ez gyakran body1 typography p
     for p in soup.select("p"):
         txt = clean_text(p.get_text("\n", strip=True))
         if len(txt) > 80 and (
@@ -584,9 +755,37 @@ def scrape_listing(
     paths = ensure_dirs(Path(output_dir).expanduser().resolve())
     visited_ads = {normalize_ad_url(x) for x in load_visited(paths["visited_ads"])}
 
-    topic_file = paths["root"] / f"{sanitize_filename(topic_name)}.txt"
+    topic_file = topic_file_path(paths["topics"], topic_name)
 
-    # Első oldal megnyitása, hogy kiderüljön az összes oldalszám
+    existing_ads = 0
+    has_existing_ads = False
+
+    if topic_file.exists():
+        if is_stream_json_finalized(topic_file):
+            print("[INFO] A topic JSON már le volt zárva, újranyitom hozzáfűzéshez.")
+            reopen_finalized_stream_json_for_append(topic_file)
+
+        last_ad_id, last_ad_url, existing_ads = get_last_written_ad_info(topic_file)
+        has_existing_ads = existing_ads > 0
+
+        if last_ad_url:
+            print(
+                f"[INFO] Meglévő topic JSON folytatása | meglévő hirdetések: {existing_ads} | "
+                f"utolsó URL: {last_ad_url} | utolsó ad_id: {last_ad_id}"
+            )
+        else:
+            print(f"[INFO] Meglévő topic JSON folytatása | meglévő hirdetések: {existing_ads}")
+
+    else:
+        write_topic_stream_header(
+            topic_file=topic_file,
+            resolved_title=topic_name,
+            topic_url=list_url,
+            start_page=start_page,
+            end_page=end_page,
+        )
+        print(f"[INFO] Új streamelt topicfájl létrehozva: {topic_file}")
+
     first_page_url = build_list_page_url(list_url, start_page)
     print(f"[INFO] Listaoldal megnyitása: {first_page_url}")
     final_url, html = fetcher.fetch(first_page_url, wait_ms=int(delay * 1000))
@@ -639,20 +838,29 @@ def scrape_listing(
                     f"[PREVIEW] Elado:{details.seller} | {details.date} | {short_preview(details.description)}"
                 )
 
-            append_ad_to_txt(topic_file, details)
+            ad_item = ad_to_output_item(details)
+            append_ad_to_stream_file(topic_file, ad_item, has_existing_ads)
+            has_existing_ads = True
+
             append_visited(paths["visited_ads"], ad_url)
             visited_ads.add(ad_url)
 
             saved_count += 1
-            print(f"[INFO] Mentve: {details.title}")
+            print(f"[INFO] Mentve JSON-be: {details.title}")
 
             if delay > 0:
                 time.sleep(delay)
 
+        del cards
+        gc.collect()
+
+    finalize_stream_json(topic_file)
+
     print("\n[INFO] Kész.")
-    print(f"[INFO] Mentett hirdetések: {saved_count}")
+    print(f"[INFO] Újonnan mentett hirdetések: {saved_count}")
     print(f"[INFO] Kihagyott (visited) hirdetések: {skipped_count}")
-    print(f"[INFO] Kimeneti fájl: {topic_file}")
+    print(f"[INFO] Meglévő hirdetések a futás előtt: {existing_ads}")
+    print(f"[INFO] Kimeneti JSON fájl: {topic_file}")
 
 
 # --------------------------------------------------
@@ -660,7 +868,9 @@ def scrape_listing(
 # --------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Jófogás hirdetés scraper Playwright + BeautifulSoup")
+    parser = argparse.ArgumentParser(
+        description="Jófogás hirdetés scraper Playwright + BeautifulSoup, streamelt JSON append módban"
+    )
     parser.add_argument(
         "--url",
         default=DEFAULT_LIST_URL,
@@ -669,14 +879,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--topic",
         default="jofogas_topic",
-        help="A mentett txt fájl neve kiterjesztés nélkül.",
+        help="A mentett JSON fájl neve kiterjesztés nélkül.",
     )
     parser.add_argument(
         "--out",
         "--output",
         dest="output",
         default=".",
-        help="Kimeneti mappa. Ebben jön létre a jofogas mappa.",
+        help="Kimeneti mappa. Ebben jön létre a jofogas/ mappa.",
     )
     parser.add_argument(
         "--delay",
@@ -760,6 +970,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] Megszakítva.")
         sys.exit(1)
+    except Exception as e:
+        print(f"[FATAL] Végzetes hiba: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -770,5 +983,4 @@ if __name__ == "__main__":
 # python jofogas_scraper.py --out ./DATA --topic elektronika --preview --delay 3
 # python jofogas_scraper.py --out ./DATA --topic elektronika --start-page 1 --end-page 5 --preview
 # python jofogas_scraper.py --out ./DATA --topic xbox --headed --delay 4
-
 # python jofogas_scraper.py --out ./jofogas --topic elektronika --preview --delay 3 --start-page 1 --end-page 5 --headed
