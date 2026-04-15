@@ -170,6 +170,29 @@ def normalize_topic_url_for_visited(url: str) -> str:
     return strip_fragment(url).rstrip("/")
 
 
+def normalize_url_for_dedup(url: str) -> str:
+    parsed = urlparse(strip_fragment(url))
+    query = parse_qs(parsed.query)
+
+    keep = {}
+    for key in ("t", "a", "nt_start", "nt_step", "na_start", "na_step"):
+        vals = query.get(key)
+        if vals:
+            keep[key] = vals
+
+    normalized = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path.rstrip("/"),
+            parsed.params,
+            urlencode(keep, doseq=True),
+            "",
+        )
+    )
+    return normalized
+
+
 def topic_file_path(subforum_dir: Path, topic_title: str) -> Path:
     return subforum_dir / f"{sanitize_filename(topic_title)}.json"
 
@@ -223,6 +246,17 @@ def find_last_comment_url_from_file(path: Path) -> Optional[str]:
         return comment_blocks[-1]
 
     return None
+
+def count_comments_in_file(path: Path) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+
+    count = 0
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            count += line.count('"comment_id"')
+    return count
+
 
 
 def init_open_json_file_if_needed(
@@ -309,6 +343,7 @@ def close_topic_json_file(
     topic_file: Path,
     saved_comment_pages: int,
     resume_source: Optional[str],
+    total_comments_downloaded: int,
 ) -> None:
     with topic_file.open("a", encoding="utf-8") as f:
         f.write("\n  ],\n")
@@ -317,6 +352,7 @@ def close_topic_json_file(
         f.write('    "scrape_status": "finished",\n')
         f.write(f'    "saved_comment_pages": {saved_comment_pages},\n')
         f.write(f'    "resume_source": {json.dumps(resume_source, ensure_ascii=False)},\n')
+        f.write(f'    "total_comments_downloaded": {total_comments_downloaded},\n')
         f.write(f'    "date_modified": {json.dumps(now_iso(), ensure_ascii=False)}\n')
         f.write("  }\n")
         f.write("}\n")
@@ -415,8 +451,12 @@ def is_bad_resolved_topic_title(title: str) -> bool:
 def topic_page_looks_valid(html: str) -> bool:
     soup = BeautifulSoup(html, "html.parser")
     try:
-        tables = soup.select("table.art")
-        return len(tables) > 0
+        if soup.select("table.art"):
+            return True
+        text = clean_text(soup.get_text(" ", strip=True)).lower()
+        if "hozzászólás" in text and ("nyitotta:" in text or "hozzászólók:" in text):
+            return True
+        return False
     finally:
         del soup
 
@@ -758,6 +798,62 @@ def parse_topic_rows_from_subforum_page(html: str, page_url: str) -> List[Dict]:
     return topics
 
 
+
+
+def extract_subforum_links_from_page(
+    html: str,
+    page_url: str,
+    *,
+    parent_url: Optional[str] = None,
+) -> List[Dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: List[Dict] = []
+    seen: Set[str] = set()
+
+    parent_norm = normalize_url_for_dedup(parent_url or page_url)
+
+    for a in soup.select("a[href]"):
+        href = clean_text(a.get("href", ""))
+        title = clean_text(a.get_text(" ", strip=True))
+        if not href or not title:
+            continue
+
+        full_url = urljoin(page_url, href)
+        if not SHOW_TOPIC_LIST_RE.search(full_url):
+            continue
+
+        norm_url = normalize_url_for_dedup(full_url)
+        if norm_url == parent_norm:
+            continue
+        if norm_url in seen:
+            continue
+
+        lower_title = title.lower()
+        if lower_title in {"előző", "következő", "next", "prev", ">", ">>", "10>", "<<", "<"}:
+            continue
+        if re.fullmatch(r"\d+", title):
+            continue
+
+        seen.add(norm_url)
+        results.append(
+            {
+                "title": title,
+                "url": full_url,
+            }
+        )
+
+    del soup
+    return results
+
+
+def page_looks_like_subforum_hub(html: str, page_url: str, *, parent_url: Optional[str] = None) -> bool:
+    topic_count = len(parse_topic_rows_from_subforum_page(html, page_url))
+    if topic_count > 0:
+        return False
+
+    nested = extract_subforum_links_from_page(html, page_url, parent_url=parent_url)
+    return len(nested) > 0
+
 def get_subforum_next_page_url(html: str, current_url: str) -> Optional[str]:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -1045,11 +1141,14 @@ def scrape_topic(
     resume_source = None
     first_comment_already_written = False
     start_page_no = 1
+    total_downloaded = 0
 
     if topic_file.exists() and topic_file.stat().st_size > 0:
         if file_looks_closed_json(topic_file):
             print("[INFO] A topic fájl már lezárt JSON-nak tűnik, kihagyva.")
             return topic_title, 0, True
+
+        total_downloaded = count_comments_in_file(topic_file)
 
         last_comment_url = find_last_comment_url_from_file(topic_file)
         if last_comment_url:
@@ -1058,9 +1157,15 @@ def scrape_topic(
                 topic_url = next_url
                 first_comment_already_written = True
                 resume_source = "existing_json"
-                print(f"[INFO] Resume: utolsó komment URL alapján innen folytatva: {topic_url}")
+                print(
+                    f"[INFO] Resume: utolsó komment URL alapján innen folytatva: {topic_url} | "
+                    f"eddig letöltött kommentek: {total_downloaded}"
+                )
         else:
-            print("[INFO] Van meglévő félkész fájl, de nem találtam benne komment URL-t. Topic elejéről indul.")
+            print(
+                "[INFO] Van meglévő félkész fájl, de nem találtam benne komment URL-t. "
+                f"Topic elejéről indul. Eddig letöltött kommentek: {total_downloaded}"
+            )
 
     fetcher.reset_context()
 
@@ -1082,6 +1187,8 @@ def scrape_topic(
     if topic_file.stat().st_size > 0 and not first_comment_already_written:
         if file_has_any_written_comment(topic_file):
             first_comment_already_written = True
+            if total_downloaded == 0:
+                total_downloaded = count_comments_in_file(topic_file)
 
     page_no = start_page_no
     finished = False
@@ -1090,6 +1197,7 @@ def scrape_topic(
     while True:
         print(f"[INFO] Kommentoldal #{page_no}: {current_url}")
         page_comments = parse_comments_from_topic_page(html, current_url)
+        added_on_this_page = len(page_comments)
 
         if page_comments:
             first_comment_already_written = append_comments_page_to_open_json(
@@ -1097,10 +1205,12 @@ def scrape_topic(
                 comments=page_comments,
                 first_comment_already_written=first_comment_already_written,
             )
+            total_downloaded += added_on_this_page
 
         print(
             f"[INFO] Oldal appendelve a JSON végére: {topic_file} | "
-            f"oldal kommentjei: {len(page_comments)}"
+            f"új kommentek: {added_on_this_page} | "
+            f"összes letöltött komment eddig: {total_downloaded}"
         )
 
         next_url = get_topic_next_page_url(html, current_url)
@@ -1123,10 +1233,12 @@ def scrape_topic(
         page_no += 1
 
     if finished:
+        print(f"[INFO] Topic összes letöltött komment: {total_downloaded}")
         close_topic_json_file(
             topic_file=topic_file,
             saved_comment_pages=page_no,
             resume_source=resume_source,
+            total_comments_downloaded=total_downloaded,
         )
         really_closed = file_looks_closed_json(topic_file)
         print(f"[INFO] Topic végleg lezárva: {topic_file} | lezárt={really_closed}")
@@ -1176,7 +1288,7 @@ def scrape_subforum(
         for idx, topic in enumerate(topics, start=1):
             topic_title = topic["title"]
             topic_url = topic["url"]
-            topic_url_norm = normalize_topic_url_for_visited(topic_url)
+            topic_url_norm = normalize_url_for_dedup(topic_url)
 
             print(f"\n[INFO] ({idx}/{len(topics)}) Topic: {topic_title}")
 
@@ -1252,7 +1364,7 @@ def scrape_main(
     index_dir = ensure_dirs(base_output)
     visited_file = ensure_root_visited_file(index_dir)
     visited_topics = load_visited(visited_file)
-    visited_topics = {normalize_topic_url_for_visited(x) for x in visited_topics}
+    visited_topics = {normalize_url_for_dedup(x) for x in visited_topics}
 
     print(f"[INFO] Főoldal megnyitása: {MAIN_FORUM_URL}")
     final_url, html = fetcher.fetch(MAIN_FORUM_URL, wait_ms=int(delay * 1000))
@@ -1398,4 +1510,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-    # python index_scraper.py --output ./index --delay 1.5
+    # python index_scraper.py --output ./index --delay 2
