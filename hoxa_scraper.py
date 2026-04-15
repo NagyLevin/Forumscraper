@@ -1222,8 +1222,10 @@ def scrape_topic(
             print("[INFO] Hosszú topic közbeni memória-kímélő context reset.")
             fetcher.reset_context()
 
+        requested_next_page_no = next_page_no
+
         try:
-            current_url, html = fetcher.fetch(next_url, wait_ms=int(delay * 1000))
+            fetched_url, html = fetcher.fetch(next_url, wait_ms=int(delay * 1000))
         except Exception as e:
             print(f"[WARN] Hiba a következő kommentoldal megnyitásakor: {e}")
             break
@@ -1232,8 +1234,27 @@ def scrape_topic(
             print("[INFO] A következő oldal már nem tartalmaz kommenteket, megállok.")
             break
 
+        fetched_page_no = get_topic_page_number(fetched_url)
+        fetched_base_url = get_topic_base_url(fetched_url)
+        expected_base_url = get_topic_base_url(current_url)
+
+        if fetched_base_url != expected_base_url:
+            print(
+                "[INFO] A következő fetch már nem ugyanahhoz a topichoz tartozó oldalra jutott, megállok. "
+                f"Kért URL: {next_url} | kapott URL: {fetched_url}"
+            )
+            break
+
+        if fetched_page_no != requested_next_page_no:
+            print(
+                "[INFO] A Hoxa nem a kért kommentoldalt adta vissza, valószínűleg túlcsúsztunk a topic végén. "
+                f"Kért oldal: {requested_next_page_no} | kapott oldal: {fetched_page_no} | URL: {fetched_url}"
+            )
+            break
+
         previous_page_fingerprint = current_fingerprint
-        page_no = get_topic_page_number(current_url)
+        current_url = fetched_url
+        page_no = fetched_page_no
 
         del page_comments
         gc.collect()

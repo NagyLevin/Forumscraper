@@ -24,7 +24,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-BASE_LIST_URL = "https://prohardver.hu/temak/notebook/listaz.php"
+BASE_LIST_URL = "https://prohardver.hu/temak/tv_audio/listaz.php"
 
 HSZ_URL_RE = re.compile(
     r"^(?P<prefix>https?://[^#]+?/hsz_)(?P<start>\d+)-(?P<end>\d+)(?P<suffix>\.html)(?:#msg(?P<msg>\d+))?$",
