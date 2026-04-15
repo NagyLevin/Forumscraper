@@ -33,6 +33,7 @@ HSZ_URL_RE = re.compile(
 
 URL_FIELD_RE = re.compile(r'"url"\s*:\s*"([^"]+)"')
 NEXT_URL_FIELD_RE = re.compile(r'"next_resume_url"\s*:\s*(?:"([^"]+)"|null)')
+COMMENT_ID_FIELD_RE = re.compile(r'"comment_id"\s*:\s*(?:"([^"]+)"|null)')
 
 
 def build_list_url(offset: int) -> str:
@@ -660,16 +661,16 @@ def try_go_to_next_page(driver: webdriver.Chrome, delay: float, max_empty_skips:
 
 def ensure_output_dirs(base_output: Path) -> Tuple[Path, Path, Path]:
     prohardver_dir = base_output / "prohardver"
-    notebooks_dir = prohardver_dir / "notebooks"
-    visited_file = prohardver_dir / "visited_notebook.txt"
+    tv_audio_dir = prohardver_dir / "tv_audio"
+    visited_file = prohardver_dir / "visited_tv_audio.txt"
 
     prohardver_dir.mkdir(parents=True, exist_ok=True)
-    notebooks_dir.mkdir(parents=True, exist_ok=True)
+    tv_audio_dir.mkdir(parents=True, exist_ok=True)
 
     if not visited_file.exists():
         visited_file.write_text("", encoding="utf-8")
 
-    return prohardver_dir, notebooks_dir, visited_file
+    return prohardver_dir, tv_audio_dir, visited_file
 
 
 def load_visited(visited_file: Path) -> Set[str]:
@@ -692,8 +693,8 @@ def normalize_topic_url_for_visited(topic_url: str) -> str:
     return normalize_topic_base_url(topic_url)
 
 
-def topic_file_path(notebooks_dir: Path, title: str) -> Path:
-    return notebooks_dir / f"{sanitize_filename(title)}.json"
+def topic_file_path(output_dir: Path, title: str) -> Path:
+    return output_dir / f"{sanitize_filename(title)}.json"
 
 
 def read_tail_text(path: Path, max_bytes: int = 1024 * 1024) -> str:
@@ -717,6 +718,17 @@ def read_head_text(path: Path, max_bytes: int = 1024 * 1024) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
+def count_existing_comments_in_file(path: Path) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+
+    count = 0
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            count += line.count('"comment_id":')
+    return count
+
+
 def file_looks_closed_json(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
@@ -728,7 +740,7 @@ def file_looks_closed_json(path: Path) -> bool:
         if not isinstance(data, dict):
             return False
 
-        if data.get("origin") != "prohardver_forum":
+        if data.get("origin") != "prohardver_tv_audio":
             return False
 
         extra = data.get("extra")
@@ -752,7 +764,7 @@ def file_looks_closed_json(path: Path) -> bool:
         return False
 
     required_markers = [
-        '"origin": "prohardver_forum"',
+        '"origin": "prohardver_tv_audio"',
         '"scrape_status": "finished"',
         '"date_modified":',
     ]
@@ -826,6 +838,28 @@ def find_last_next_resume_url_from_file(path: Path) -> Optional[str]:
     return None
 
 
+def find_last_comment_id_from_file(path: Path) -> Optional[str]:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    text = read_tail_text(path, max_bytes=2 * 1024 * 1024)
+
+    marker = '"comments": ['
+    idx = text.find(marker)
+    if idx != -1:
+        text = text[idx + len(marker):]
+
+    matches = COMMENT_ID_FIELD_RE.findall(text)
+    if not matches:
+        return None
+
+    for value in reversed(matches):
+        cleaned = clean_text(value)
+        if cleaned and cleaned.lower() != "null":
+            return cleaned
+    return None
+
+
 def init_open_json_file_if_needed(
     topic_file: Path,
     resolved_title: str,
@@ -846,9 +880,9 @@ def init_open_json_file_if_needed(
             "url": topic_url,
             "language": "hu",
             "tags": [],
-            "rights": "PROHARDVER! fórum tartalom",
+            "rights": "PROHARDVER! TV/Audió fórum tartalom",
             "extra": {},
-            "origin": "prohardver_forum",
+            "origin": "prohardver_tv_audio",
         },
     }
 
@@ -904,14 +938,16 @@ def append_comments_page_to_open_json(
 def close_topic_json_file(
     topic_file: Path,
     saved_comment_pages: int,
+    saved_comment_count: int,
     resume_source: Optional[str],
 ) -> None:
     with topic_file.open("a", encoding="utf-8") as f:
         f.write("\n  ],\n")
-        f.write('  "origin": "prohardver_forum",\n')
+        f.write('  "origin": "prohardver_tv_audio",\n')
         f.write('  "extra": {\n')
         f.write('    "scrape_status": "finished",\n')
         f.write(f'    "saved_comment_pages": {saved_comment_pages},\n')
+        f.write(f'    "saved_comment_count": {saved_comment_count},\n')
         f.write(f'    "resume_source": {json.dumps(resume_source, ensure_ascii=False)},\n')
         f.write(f'    "date_modified": {json.dumps(now_local_iso(), ensure_ascii=False)}\n')
         f.write("  }\n")
@@ -1012,9 +1048,15 @@ def scrape_topic_sequentially(
     init_open_json_file_if_needed(topic_file, resolved_title, topic_url)
 
     first_comment_already_written = file_has_any_saved_comment(topic_file)
+    existing_comment_count = count_existing_comments_in_file(topic_file)
+    last_saved_comment_id = find_last_comment_id_from_file(topic_file)
+
+    total_saved_comments = existing_comment_count
+    print(f"[INFO] Már meglévő kommentek a fájlban: {existing_comment_count}")
 
     visited_urls: Set[str] = set()
     page_index = 1
+    first_processed_page = True
 
     while True:
         current_url = driver.current_url
@@ -1033,16 +1075,50 @@ def scrape_topic_sequentially(
         print(f"[DEBUG] Kommentoldal #{page_index}: {current_url}")
         page_comments = parse_comments_from_html(driver.page_source, current_url, next_resume_url)
 
+        if first_processed_page and existing_comment_count > 0 and last_saved_comment_id:
+            original_len = len(page_comments)
+            filtered_comments: List[Dict] = []
+            seen_last = False
+
+            for c in page_comments:
+                current_comment_id = str(c.get("comment_id") or "")
+                if not seen_last:
+                    if current_comment_id == str(last_saved_comment_id):
+                        seen_last = True
+                    continue
+                filtered_comments.append(c)
+
+            if seen_last:
+                page_comments = filtered_comments
+                print(
+                    f"[INFO] Resume szűrés az első oldalon: {original_len} kommentből "
+                    f"{len(page_comments)} új maradt az utolsó mentett comment_id után."
+                )
+            else:
+                print(
+                    "[INFO] Resume módban az utolsó mentett comment_id nem található ezen az oldalon, "
+                    "ezért ezt az oldalt újként kezelem."
+                )
+
+            first_processed_page = False
+            last_saved_comment_id = None
+        else:
+            first_processed_page = False
+
+        new_comments_on_page = len(page_comments)
+
         if page_comments:
             first_comment_already_written = append_comments_page_to_open_json(
                 topic_file=topic_file,
                 comments=page_comments,
                 first_comment_already_written=first_comment_already_written,
             )
+            total_saved_comments += new_comments_on_page
 
         print(
             f"[INFO] Oldal appendelve a JSON végére: {topic_file} | "
-            f"oldal kommentjei: {len(page_comments)}"
+            f"új kommentek ezen az oldalon: {new_comments_on_page} | "
+            f"összes mentett komment eddig: {total_saved_comments}"
         )
 
         moved = try_go_to_next_page(driver, delay)
@@ -1056,20 +1132,27 @@ def scrape_topic_sequentially(
             close_topic_json_file(
                 topic_file=topic_file,
                 saved_comment_pages=page_index,
+                saved_comment_count=total_saved_comments,
                 resume_source=resume_source,
             )
             really_closed = file_looks_closed_json(topic_file)
-            print(f"[INFO] Topic végleg lezárva: {topic_file} | lezárt={really_closed}")
+            print(
+                f"[INFO] Topic végleg lezárva: {topic_file} | "
+                f"lezárt={really_closed} | végső kommentdarab={total_saved_comments}"
+            )
             return resolved_title, really_closed
 
         if moved is None:
-            print("[DEBUG] Timeout vagy navigációs hiba történt, a topic NEM kerül a visitedbe.")
+            print(
+                f"[DEBUG] Timeout vagy navigációs hiba történt, a topic NEM kerül a visitedbe. "
+                f"Eddig mentett kommentek: {total_saved_comments}"
+            )
             return resolved_title, False
 
 
 def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: float, headless: bool) -> None:
     base_output = Path(output_dir).expanduser().resolve()
-    _, notebooks_dir, visited_file = ensure_output_dirs(base_output)
+    _, tv_audio_dir, visited_file = ensure_output_dirs(base_output)
 
     driver = setup_driver(headless=headless)
     visited_topics = load_visited(visited_file)
@@ -1103,7 +1186,7 @@ def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: f
                     print(f"[INFO] ({idx}/{len(topics)}) Már feldolgozva, kihagyva: {topic_title}")
                     continue
 
-                topic_file = topic_file_path(notebooks_dir, topic_title)
+                topic_file = topic_file_path(tv_audio_dir, topic_title)
                 print(f"\n[INFO] ({idx}/{len(topics)}) Topic: {topic_title}")
 
                 try:
@@ -1112,7 +1195,7 @@ def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: f
                     )
 
                     if sanitize_filename(resolved_title) != sanitize_filename(topic_title):
-                        new_path = topic_file_path(notebooks_dir, resolved_title)
+                        new_path = topic_file_path(tv_audio_dir, resolved_title)
                         if new_path != topic_file and topic_file.exists():
                             topic_file.replace(new_path)
                             topic_file = new_path
@@ -1148,7 +1231,7 @@ def scrape_offsets(start_offset: int, end_offset: int, output_dir: str, delay: f
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="PROHARDVER notebook topic scraper Seleniummal, appendelt JSON mentéssel."
+        description="PROHARDVER TV/Audió topic scraper Seleniummal, appendelt JSON mentéssel."
     )
     parser.add_argument("start_offset", type=int, help="Kezdő offset. Pl. 0 vagy 100")
     parser.add_argument("end_offset", type=int, help="Vég offset. Pl. 200 vagy 300")
@@ -1189,4 +1272,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-    #python prohardver_scraper.py 0 6000 --output . --delay 3 --headless
+    # python prohardver_scraper.py 0 6000 --output . --delay 3 --headless
