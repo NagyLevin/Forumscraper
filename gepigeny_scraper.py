@@ -161,6 +161,18 @@ def get_thread_id(url: str) -> Optional[str]:
     return vals[0] if vals else None
 
 
+def get_start_offset(url: str) -> int:
+    query = parse_qs(urlparse(url).query)
+    for key in ("start", "rowstart"):
+        vals = query.get(key)
+        if vals:
+            try:
+                return int(vals[0])
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 # --------------------------------------------------
 # Adatmodellek
 # --------------------------------------------------
@@ -378,6 +390,7 @@ class BrowserFetcher:
         self.context = None
         self.page = None
         self.fetch_counter = 0
+        self.cookie_accepted_in_context = False
 
     def __enter__(self):
         self.playwright = sync_playwright().start()
@@ -427,6 +440,7 @@ class BrowserFetcher:
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.timeout_ms)
         self.page.set_default_navigation_timeout(self.timeout_ms)
+        self.cookie_accepted_in_context = False
 
     def reset_context(self) -> None:
         try:
@@ -457,37 +471,65 @@ class BrowserFetcher:
             self.reset_context()
 
     def dismiss_overlays_if_present(self) -> None:
-        selectors = [
-            "button:has-text('Elfogadom')",
-            "a:has-text('Elfogadom')",
-            "button:has-text('Összes elfogadása')",
-            "button:has-text('Accept')",
-            "button:has-text('Accept all')",
-            "button:has-text('Rendben')",
-            "button:has-text('OK')",
-        ]
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector).first
-                if loc.count() > 0 and loc.is_visible(timeout=1000):
-                    loc.click(force=True, timeout=2000)
-                    self.page.wait_for_timeout(1000)
-                    print(f"[INFO] Cookie / overlay elfogadva: {selector}")
-                    return
-            except Exception:
-                pass
+        if self.cookie_accepted_in_context:
+            return
 
-        text_candidates = ["Elfogadom", "Összes elfogadása", "Accept all", "Accept", "Rendben", "OK"]
-        for txt in text_candidates:
-            try:
-                loc = self.page.get_by_text(txt, exact=False).first
-                if loc.count() > 0 and loc.is_visible(timeout=1000):
-                    loc.click(force=True, timeout=2000)
-                    self.page.wait_for_timeout(1000)
-                    print(f"[INFO] Cookie / overlay elfogadva: {txt}")
-                    return
-            except Exception:
-                pass
+        consent_scopes = [
+            "#qc-cmp2-container",
+            ".qc-cmp2-container",
+            "[id*='cookie']",
+            "[class*='cookie']",
+            "[id*='consent']",
+            "[class*='consent']",
+            "[id*='gdpr']",
+            "[class*='gdpr']",
+        ]
+        button_texts = [
+            "Elfogadom",
+            "Összes elfogadása",
+            "Accept all",
+            "Accept",
+            "Rendben",
+        ]
+
+        for scope in consent_scopes:
+            for txt in button_texts:
+                selectors = [
+                    f"{scope} button:has-text('{txt}')",
+                    f"{scope} a:has-text('{txt}')",
+                    f"{scope} [role='button']:has-text('{txt}')",
+                ]
+                for selector in selectors:
+                    try:
+                        loc = self.page.locator(selector).first
+                        if loc.count() > 0 and loc.is_visible(timeout=1000):
+                            loc.click(force=True, timeout=2500)
+                            self.page.wait_for_timeout(1000)
+                            self.cookie_accepted_in_context = True
+                            print(f"[INFO] Cookie / overlay elfogadva: {selector}")
+                            return
+                    except Exception:
+                        pass
+
+        page_text = ""
+        try:
+            page_text = self.page.locator("body").inner_text(timeout=1500)
+        except Exception:
+            pass
+
+        cookie_keywords = ("cookie", "süti", "adatvédelem", "consent", "gdpr", "privacy")
+        if any(keyword.lower() in page_text.lower() for keyword in cookie_keywords):
+            for txt in button_texts:
+                try:
+                    loc = self.page.get_by_text(txt, exact=False).first
+                    if loc.count() > 0 and loc.is_visible(timeout=1000):
+                        loc.click(force=True, timeout=2500)
+                        self.page.wait_for_timeout(1000)
+                        self.cookie_accepted_in_context = True
+                        print(f"[INFO] Cookie / overlay elfogadva: {txt}")
+                        return
+                except Exception:
+                    pass
 
     def fetch(self, url: str, wait_ms: int = 1500, ready_selectors: Optional[List[str]] = None) -> Tuple[str, str]:
         last_exc = None
@@ -635,12 +677,8 @@ def parse_topics_from_group_page(html: str, current_url: str, group: ForumGroupI
 
 def parse_pagination(html: str, current_url: str) -> Tuple[int, int, Optional[str]]:
     soup = BeautifulSoup(html, "html.parser")
-    pager = (
-        soup.select_one("div.pagenav_d")
-        or soup.select_one("div.pagenav")
-        or soup.select_one("div[class*='pagenav']")
-    )
-    if not pager:
+    pagers = soup.select("div.pagenav_d, div.pagenav, div[class*='pagenav']")
+    if not pagers:
         del soup
         gc.collect()
         return 1, 1, None
@@ -648,11 +686,33 @@ def parse_pagination(html: str, current_url: str) -> Tuple[int, int, Optional[st
     current_page = 1
     max_page = 1
     next_url = None
+    current_start = get_start_offset(current_url)
 
-    active = pager.select_one(".pagenav_c.active")
-    if active:
-        current_page = extract_last_number(active.get_text(" ", strip=True)) or 1
-        title = clean_text(active.get("title") or "")
+    chosen_pager = pagers[-1]
+    for pager in pagers:
+        active = pager.select_one(".pagenav_c.active")
+        if active:
+            chosen_pager = pager
+            txt = clean_text(active.get_text(" ", strip=True))
+            if txt.isdigit():
+                current_page = int(txt)
+            title = clean_text(active.get("title") or "")
+            m = re.search(r"/\s*(\d+)", title)
+            if m:
+                max_page = max(max_page, int(m.group(1)))
+            break
+
+    pager = chosen_pager
+
+    numbered_links: List[Tuple[int, str]] = []
+    for a in pager.select("a.pagenav_c[href], a[href].pagenav_c"):
+        href = clean_text(a.get("href") or "")
+        txt = clean_text(a.get_text(" ", strip=True))
+        title = clean_text(a.get("title") or "")
+        if txt.isdigit() and href:
+            page_no = int(txt)
+            numbered_links.append((page_no, urljoin(current_url, href)))
+            max_page = max(max_page, page_no)
         m = re.search(r"/\s*(\d+)", title)
         if m:
             max_page = max(max_page, int(m.group(1)))
@@ -666,11 +726,25 @@ def parse_pagination(html: str, current_url: str) -> Tuple[int, int, Optional[st
         if txt.isdigit():
             max_page = max(max_page, int(txt))
 
-    next_link = pager.select_one("a.pagenav_s[href]")
-    if next_link:
-        href = next_link.get("href") or ""
-        if href:
-            next_url = urljoin(current_url, href)
+    expected_next = current_page + 1
+    for page_no, href in sorted(numbered_links, key=lambda x: x[0]):
+        if page_no == expected_next:
+            next_url = href
+            break
+
+    if not next_url:
+        arrow_candidates: List[Tuple[int, str]] = []
+        for a in pager.select("a.pagenav_s[href], a[href].pagenav_s"):
+            href = clean_text(a.get("href") or "")
+            if not href:
+                continue
+            full = urljoin(current_url, href)
+            target_start = get_start_offset(full)
+            if target_start > current_start:
+                arrow_candidates.append((target_start, full))
+        if arrow_candidates:
+            arrow_candidates.sort(key=lambda x: x[0])
+            next_url = arrow_candidates[0][1]
 
     del soup
     gc.collect()
@@ -858,6 +932,7 @@ def scrape_topic(
         if current_page_no >= max_page_no:
             break
 
+        print(f"[INFO] Következő topic oldal URL: {next_url}")
         current_url, html = fetcher.fetch(
             next_url,
             wait_ms=int(delay * 1000),
