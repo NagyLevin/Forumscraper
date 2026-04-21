@@ -792,23 +792,6 @@ def parse_comment_date(block: Tag) -> Optional[str]:
     return None
 
 
-def _extract_text_after_node(parent: Tag, node: Tag) -> str:
-    parts: List[str] = []
-    cur = node.next_sibling
-
-    while cur is not None:
-        if isinstance(cur, str):
-            parts.append(cur)
-        elif isinstance(cur, Tag):
-            if cur.name == "br":
-                parts.append("\n")
-            else:
-                parts.append(cur.get_text("\n", strip=False))
-        cur = cur.next_sibling
-
-    return clean_text("".join(parts))
-
-
 def _is_probably_quote_line(line: str) -> bool:
     s = clean_text(line)
     if not s:
@@ -821,10 +804,6 @@ def _is_probably_quote_line(line: str) -> bool:
     if lowered.startswith("írta:"):
         return True
     if s.startswith(">"):
-        return True
-    if s.startswith('"') or s.startswith("„") or s.startswith("»"):
-        return True
-    if s.endswith('"') or s.endswith("”") or s.endswith("«"):
         return True
     if lowered.startswith("[quote]") or lowered.endswith("[/quote]"):
         return True
@@ -848,17 +827,11 @@ def parse_comment_text(block: Tag) -> str:
     if text_clone is None:
         return clean_text(text_el.get_text("\n", strip=True))
 
-    quote_nodes = text_clone.select("div.quote")
-    if quote_nodes:
-        last_quote = quote_nodes[-1]
-        text_after_quote = _extract_text_after_node(text_clone, last_quote)
-        text_after_quote = _strip_leading_quote_lines(text_after_quote)
-        if text_after_quote:
-            return text_after_quote
-
+    # Eltávolítjuk az összes idézet blokkot teljesen
     for quote in text_clone.select("div.quote"):
         quote.decompose()
 
+    # Esetleges régi formátumú idézet bevezetők törlése
     for bold in list(text_clone.select("b")):
         bold_text = clean_text(bold.get_text(" ", strip=True)).lower()
         if bold_text.endswith("írta:"):
@@ -877,6 +850,10 @@ def parse_comment_text(block: Tag) -> str:
 
     cleaned = clean_text(text_clone.get_text("\n", strip=True))
     cleaned = _strip_leading_quote_lines(cleaned)
+    
+    # Eltávolítjuk a fórum motor vagy a felhasználók által beletett, bent ragadt idézőjeleket az elejéről/végéről
+    cleaned = re.sub(r'^[\s"\'„”«»]+|[\s"\'„”«»]+$', '', cleaned)
+
     return cleaned
 
 
@@ -1181,6 +1158,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 # python gepigeny_forum_scraper_final.py --output ./Gepigeny --headed --preview --delay 3
 # python gepigeny_forum_scraper_final.py --output ./Gepigeny --headed --only-group "Játékokról általában"
