@@ -792,11 +792,92 @@ def parse_comment_date(block: Tag) -> Optional[str]:
     return None
 
 
+def _extract_text_after_node(parent: Tag, node: Tag) -> str:
+    parts: List[str] = []
+    cur = node.next_sibling
+
+    while cur is not None:
+        if isinstance(cur, str):
+            parts.append(cur)
+        elif isinstance(cur, Tag):
+            if cur.name == "br":
+                parts.append("\n")
+            else:
+                parts.append(cur.get_text("\n", strip=False))
+        cur = cur.next_sibling
+
+    return clean_text("".join(parts))
+
+
+def _is_probably_quote_line(line: str) -> bool:
+    s = clean_text(line)
+    if not s:
+        return False
+
+    lowered = s.lower()
+
+    if lowered.endswith("írta:"):
+        return True
+    if lowered.startswith("írta:"):
+        return True
+    if s.startswith(">"):
+        return True
+    if s.startswith('"') or s.startswith("„") or s.startswith("»"):
+        return True
+    if s.endswith('"') or s.endswith("”") or s.endswith("«"):
+        return True
+    if lowered.startswith("[quote]") or lowered.endswith("[/quote]"):
+        return True
+
+    return False
+
+
+def _strip_leading_quote_lines(text: str) -> str:
+    lines = [clean_text(line) for line in text.splitlines()]
+    while lines and (_is_probably_quote_line(lines[0]) or not lines[0]):
+        lines.pop(0)
+    return clean_text("\n".join(lines))
+
+
 def parse_comment_text(block: Tag) -> str:
     text_el = block.select_one(".comm_text")
-    if text_el:
+    if not text_el:
+        return ""
+
+    text_clone = BeautifulSoup(str(text_el), "html.parser").select_one(".comm_text")
+    if text_clone is None:
         return clean_text(text_el.get_text("\n", strip=True))
-    return ""
+
+    quote_nodes = text_clone.select("div.quote")
+    if quote_nodes:
+        last_quote = quote_nodes[-1]
+        text_after_quote = _extract_text_after_node(text_clone, last_quote)
+        text_after_quote = _strip_leading_quote_lines(text_after_quote)
+        if text_after_quote:
+            return text_after_quote
+
+    for quote in text_clone.select("div.quote"):
+        quote.decompose()
+
+    for bold in list(text_clone.select("b")):
+        bold_text = clean_text(bold.get_text(" ", strip=True)).lower()
+        if bold_text.endswith("írta:"):
+            next_sib = bold.next_sibling
+            while next_sib is not None and (
+                (isinstance(next_sib, str) and not clean_text(next_sib))
+                or (isinstance(next_sib, Tag) and next_sib.name == "br")
+            ):
+                removable = next_sib
+                next_sib = next_sib.next_sibling
+                if isinstance(removable, Tag):
+                    removable.decompose()
+                else:
+                    removable.extract() if hasattr(removable, "extract") else None
+            bold.decompose()
+
+    cleaned = clean_text(text_clone.get_text("\n", strip=True))
+    cleaned = _strip_leading_quote_lines(cleaned)
+    return cleaned
 
 
 def parse_comments_from_topic_page(html: str, topic_page_url: str) -> List[Dict]:
