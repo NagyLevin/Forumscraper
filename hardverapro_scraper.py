@@ -333,53 +333,52 @@ def extract_main_ad_text(soup: BeautifulSoup) -> str:
     return ""
 
 
-def extract_seller(soup: BeautifulSoup, page_url: str, fallback_seller: Optional[str]) -> Tuple[str, Optional[str]]:
-    """
-    A HardverApró hirdetésoldalon a hirdető neve jellemzően itt van:
-    <a href="/aprok/hirdeto/dextypremium/index.html?uadid=4415596">DextyPremium</a>
-    Ezért elsőként kifejezetten a /aprok/hirdeto/ + uadid linket keressük.
-    """
-    seller_selectors = [
-        "div.uad-content a[href*='/aprok/hirdeto/'][href*='uadid=']",
-        "div.uad-content-block a[href*='/aprok/hirdeto/'][href*='uadid=']",
-        "a[href*='/aprok/hirdeto/'][href*='uadid=']",
-        "div.uad-content a[href*='/aprok/hirdeto/']",
-        "div.uad-content-block a[href*='/aprok/hirdeto/']",
-        "a[href*='/aprok/hirdeto/']",
-    ]
-
-    for selector in seller_selectors:
-        node = soup.select_one(selector)
-        if not node:
-            continue
-
-        name = clean_text(node.get_text(" ", strip=True))
-        href = node.get("href")
-        seller_url = urljoin(page_url, href) if href else None
-
-        if name:
-            return name, seller_url
-
-    return clean_text(fallback_seller or ""), None
-
-
 def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[str]]) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
+    # ------------------------
+    # Title
+    # ------------------------
     title = ""
     for selector in ["h1", "meta[property='og:title']", "title"]:
         node = soup.select_one(selector)
         if not node:
             continue
+
         if selector.startswith("meta"):
             title = clean_text(node.get("content", ""))
         else:
             title = clean_text(node.get_text(" ", strip=True))
+
         if title:
             break
 
-    seller_name, seller_url = extract_seller(soup, page_url, fallback.get("listing_seller"))
+    # ------------------------
+    # Seller 
+    # ------------------------
+    seller_name = ""
+    seller_url = None
 
+    # Végtelenül leegyszerűsített keresés, ami pontosan azt csinálja, amit kértél: 
+    # Megkeresi a "Hirdető" feliratot, és a közvetlenül mellette lévő linket veszi ki.
+    hirdeto_nodes = soup.find_all(string=re.compile(r"Hirdető"))
+    for node in hirdeto_nodes:
+        parent = node.parent
+        if not parent:
+            continue
+            
+        a_tag = parent.find("a", href=True)
+        if a_tag:
+            seller_name = clean_text(a_tag.get_text(" ", strip=True))
+            seller_url = urljoin(page_url, a_tag.get("href"))
+            break
+
+    if not seller_name:
+        seller_name = fallback.get("listing_seller") or ""
+
+    # ------------------------
+    # Date
+    # ------------------------
     date_text = ""
     date_patterns = [
         r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b",
@@ -387,6 +386,7 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
     ]
 
     candidate_texts: List[str] = []
+
     for selector in [
         "div.uad-content",
         "div.uad-content-block",
@@ -408,6 +408,9 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
         if date_text:
             break
 
+    # ------------------------
+    # Price
+    # ------------------------
     price = ""
     for selector in [".uad-price", ".price"]:
         node = soup.select_one(selector)
@@ -416,19 +419,38 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
             if price:
                 break
 
+    # ------------------------
+    # Details table
+    # ------------------------
     details_map: Dict[str, str] = {}
+
     for row in soup.select("div.uad-details div.row"):
         cols = row.select("div")
+
         if len(cols) >= 2:
             key = clean_text(cols[0].get_text(" ", strip=True)).rstrip(":")
             value = clean_text(cols[-1].get_text(" ", strip=True))
+
             if key and value:
                 details_map[key] = value
 
-    breadcrumb = [clean_text(x.get_text(" ", strip=True)) for x in soup.select("ol.breadcrumb li, .breadcrumb li")]
+    # ------------------------
+    # Breadcrumb
+    # ------------------------
+    breadcrumb = [
+        clean_text(x.get_text(" ", strip=True))
+        for x in soup.select("ol.breadcrumb li, .breadcrumb li")
+    ]
     breadcrumb = [x for x in breadcrumb if x]
 
+    # ------------------------
+    # Content 
+    # ------------------------
     content_text = extract_main_ad_text(soup)
+
+    # ------------------------
+    # UADID
+    # ------------------------
     resolved_uadid = fallback.get("uadid") or extract_uadid_from_url(page_url)
 
     return {
@@ -444,7 +466,6 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
         "details": details_map,
         "breadcrumb": breadcrumb,
     }
-
 
 def ensure_output_files(base_output: Path) -> Tuple[Path, Path, Path]:
     hardverapro_dir = base_output / "hardverapro"
@@ -699,7 +720,6 @@ def scrape_single_ad(driver: webdriver.Chrome, ad_meta: Dict[str, Optional[str]]
     try:
         driver.get(ad_url)
     except TimeoutException:
-        # Ha a DOM már bejött, de valami reklám/kép miatt timeoutolna, akkor is próbáljuk kinyerni.
         print(f"[WARN] Page-load timeout, de megpróbálom feldolgozni: {ad_url}")
 
     t_get = time.perf_counter()
@@ -877,11 +897,6 @@ def scrape_all_offsets(output_dir: str, delay: float, headless: bool, start_offs
                 except Exception as e:
                     print(f"[WARN] Váratlan hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
 
-                # FONTOS GYORSÍTÁS:
-                # Nem töltjük vissza a listaoldalt minden hirdetés után.
-                # A listaoldalról már előre kinyertük az összes URL-t az ads listába,
-                # ezért ez a visszatöltés felesleges volt, és ez okozhatta a 30-60 mp-es lassulást.
-
             print(f"[INFO] Oldal kész | offset={offset} | újonnan mentett hirdetések ezen az oldalon: {saved_on_this_page}")
             offset += 100
 
@@ -945,6 +960,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-    # Példa:
-    # python hardverapro_scraper.py --output . --delay 3 --headless
