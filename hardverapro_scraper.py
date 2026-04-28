@@ -27,10 +27,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-
 BASE_LIST_URL = "https://hardverapro.hu/aprok/index.html?offset={offset}"
 START_URL = BASE_LIST_URL.format(offset=0)
-
 ORIGIN_NAME = "hardverapro_aprok"
 RIGHTS_TEXT = "hardverapro.hu hirdetés tartalom"
 
@@ -90,10 +88,8 @@ def now_local_iso() -> str:
 
 def setup_driver(headless: bool = False) -> webdriver.Chrome:
     options = Options()
-
     if headless:
         options.add_argument("--headless=new")
-
     options.add_argument("--window-size=1600,1200")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--no-sandbox")
@@ -118,12 +114,10 @@ def safe_click(driver: webdriver.Chrome, element) -> bool:
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
         time.sleep(0.2)
-
         try:
             element.click()
         except Exception:
             driver.execute_script("arguments[0].click();", element)
-
         return True
     except Exception:
         return False
@@ -131,7 +125,6 @@ def safe_click(driver: webdriver.Chrome, element) -> bool:
 
 def click_first_visible(driver: webdriver.Chrome, xpaths: List[str], timeout: float = 5.0) -> bool:
     end_time = time.time() + timeout
-
     while time.time() < end_time:
         for xpath in xpaths:
             try:
@@ -149,9 +142,7 @@ def click_first_visible(driver: webdriver.Chrome, xpaths: List[str], timeout: fl
                 if safe_click(driver, element):
                     time.sleep(0.8)
                     return True
-
         time.sleep(0.2)
-
     return False
 
 
@@ -161,12 +152,9 @@ def reject_cookies(driver: webdriver.Chrome, timeout: float = 8.0) -> bool:
         "//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyzáéíóöőúüű', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÖŐÚÜŰ'), 'NEM FOGADOM EL')]",
         "//*[contains(@class,'cookie')]//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyzáéíóöőúüű', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÖŐÚÜŰ'), 'NEM FOGADOM EL')]",
     ]
-
     clicked = click_first_visible(driver, xpaths, timeout=timeout)
-
     if clicked:
         print("[DEBUG] Sütik elutasítva.")
-
     return clicked
 
 
@@ -176,19 +164,15 @@ def close_skip_popup(driver: webdriver.Chrome, timeout: float = 4.0) -> bool:
         "//*[contains(normalize-space(), 'Lemaradok')]",
         "//input[@type='button' and @value='Lemaradok']",
     ]
-
     clicked = click_first_visible(driver, xpaths, timeout=timeout)
-
     if clicked:
         print("[DEBUG] Lemaradok popup bezárva.")
-
     return clicked
 
 
 def dismiss_known_popups(driver: webdriver.Chrome, first_page: bool = False) -> None:
     if first_page:
         reject_cookies(driver, timeout=8.0)
-
     close_skip_popup(driver, timeout=3.0)
 
 
@@ -198,7 +182,6 @@ def wait_for_listing_page(driver: webdriver.Chrome, timeout: int = 20) -> None:
         "li.media[data-uadid] a[href*='/aprok/'][href$='.html']",
         "main li.media[data-uadid]",
     ]
-
     for selector in selectors:
         try:
             WebDriverWait(driver, timeout).until(
@@ -207,14 +190,12 @@ def wait_for_listing_page(driver: webdriver.Chrome, timeout: int = 20) -> None:
             return
         except TimeoutException:
             pass
-
     raise TimeoutException("Nem található hirdetéslista ezen az oldalon.")
 
 
 def page_has_ads(driver: webdriver.Chrome) -> bool:
     try:
-        items = driver.find_elements(By.CSS_SELECTOR, "li.media[data-uadid]")
-        return len(items) > 0
+        return len(driver.find_elements(By.CSS_SELECTOR, "li.media[data-uadid]")) > 0
     except Exception:
         return False
 
@@ -224,14 +205,7 @@ def page_has_no_results(driver: webdriver.Chrome) -> bool:
         body_text = clean_text(driver.find_element(By.TAG_NAME, "body").text).lower()
     except Exception:
         return False
-
-    phrases = [
-        "nincs találat",
-        "nem található hirdetés",
-        "nincs több hirdetés",
-        "nincsenek hirdetések",
-    ]
-
+    phrases = ["nincs találat", "nem található hirdetés", "nincs több hirdetés", "nincsenek hirdetések"]
     return any(p in body_text for p in phrases)
 
 
@@ -244,7 +218,6 @@ def parse_listing_ads(html: str, page_url: str) -> List[Dict[str, Optional[str]]
 
     for item in items:
         uadid = clean_text(item.get("data-uadid", "")) or None
-
         link = item.select_one("h1 a[href]") or item.select_one("a[href*='/aprok/'][href]")
         if not link:
             continue
@@ -254,17 +227,18 @@ def parse_listing_ads(html: str, page_url: str) -> List[Dict[str, Optional[str]]
             continue
 
         full_url = urljoin(page_url, href)
-
         if full_url in seen_urls:
             continue
-
         seen_urls.add(full_url)
 
         title = clean_text(link.get_text(" ", strip=True))
-
         price_node = item.select_one(".uad-price")
         location_node = item.select_one(".uad-col-info")
-        seller_link = item.select_one(".uad-col-title a[href*='/aprok/hirdeto/']")
+
+        seller_link = (
+            item.select_one("a[href*='/aprok/hirdeto/'][href*='uadid=']")
+            or item.select_one("a[href*='/aprok/hirdeto/']")
+        )
 
         ads.append(
             {
@@ -288,7 +262,6 @@ def wait_for_ad_page(driver: webdriver.Chrome, timeout: int = 20) -> None:
         "div.trif-content",
         "a[href*='/aprok/hirdeto/']",
     ]
-
     for selector in selectors:
         try:
             WebDriverWait(driver, timeout).until(
@@ -297,24 +270,19 @@ def wait_for_ad_page(driver: webdriver.Chrome, timeout: int = 20) -> None:
             return
         except TimeoutException:
             pass
-
     raise TimeoutException("Nem található hirdetésoldal-tartalom.")
 
 
 def extract_uadid_from_url(url: str) -> Optional[str]:
     if not url:
         return None
-
     parsed = urlparse(url)
     qs = parse_qs(parsed.query)
-
     if "uadid" in qs and qs["uadid"]:
         return clean_text(qs["uadid"][0]) or None
-
     m = re.search(r"uadid[-_=](\d+)", url, flags=re.I)
     if m:
         return m.group(1)
-
     return None
 
 
@@ -335,7 +303,6 @@ def extract_main_ad_text(soup: BeautifulSoup) -> str:
 
     fallback_nodes = soup.select("div.uad-content p, div.uad-content-block p")
     parts = []
-
     for node in fallback_nodes:
         text = clean_text(node.get_text("\n", strip=True))
         if text:
@@ -351,45 +318,52 @@ def extract_main_ad_text(soup: BeautifulSoup) -> str:
     return ""
 
 
+def extract_seller(soup: BeautifulSoup, page_url: str, fallback_seller: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    A HardverApró hirdetésoldalon a hirdető neve jellemzően itt van:
+    <a href="/aprok/hirdeto/dextypremium/index.html?uadid=4415596">DextyPremium</a>
+    Ezért elsőként kifejezetten a /aprok/hirdeto/ + uadid linket keressük.
+    """
+    seller_selectors = [
+        "div.uad-content a[href*='/aprok/hirdeto/'][href*='uadid=']",
+        "div.uad-content-block a[href*='/aprok/hirdeto/'][href*='uadid=']",
+        "a[href*='/aprok/hirdeto/'][href*='uadid=']",
+        "div.uad-content a[href*='/aprok/hirdeto/']",
+        "div.uad-content-block a[href*='/aprok/hirdeto/']",
+        "a[href*='/aprok/hirdeto/']",
+    ]
+
+    for selector in seller_selectors:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+
+        name = clean_text(node.get_text(" ", strip=True))
+        href = node.get("href")
+        seller_url = urljoin(page_url, href) if href else None
+
+        if name:
+            return name, seller_url
+
+    return clean_text(fallback_seller or ""), None
+
+
 def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[str]]) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
     title = ""
     for selector in ["h1", "meta[property='og:title']", "title"]:
         node = soup.select_one(selector)
-
         if not node:
             continue
-
         if selector.startswith("meta"):
             title = clean_text(node.get("content", ""))
         else:
             title = clean_text(node.get_text(" ", strip=True))
-
         if title:
             break
 
-    seller_name = ""
-    seller_url = None
-
-    for selector in [
-        "div.uad-content a[href*='/aprok/hirdeto/']",
-        "a[href*='/aprok/hirdeto/'][style*='font-size']",
-        "a[href*='/aprok/hirdeto/']",
-    ]:
-        node = soup.select_one(selector)
-
-        if not node:
-            continue
-
-        seller_name = clean_text(node.get_text(" ", strip=True))
-        href = node.get("href")
-
-        if href:
-            seller_url = urljoin(page_url, href)
-
-        if seller_name:
-            break
+    seller_name, seller_url = extract_seller(soup, page_url, fallback.get("listing_seller"))
 
     date_text = ""
     date_patterns = [
@@ -398,7 +372,6 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
     ]
 
     candidate_texts: List[str] = []
-
     for selector in [
         "div.uad-content",
         "div.uad-content-block",
@@ -417,7 +390,6 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
             if m:
                 date_text = clean_text(m.group(0))
                 break
-
         if date_text:
             break
 
@@ -430,31 +402,24 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
                 break
 
     details_map: Dict[str, str] = {}
-
     for row in soup.select("div.uad-details div.row"):
         cols = row.select("div")
-
         if len(cols) >= 2:
             key = clean_text(cols[0].get_text(" ", strip=True)).rstrip(":")
             value = clean_text(cols[-1].get_text(" ", strip=True))
-
             if key and value:
                 details_map[key] = value
 
-    breadcrumb = [
-        clean_text(x.get_text(" ", strip=True))
-        for x in soup.select("ol.breadcrumb li, .breadcrumb li")
-    ]
+    breadcrumb = [clean_text(x.get_text(" ", strip=True)) for x in soup.select("ol.breadcrumb li, .breadcrumb li")]
     breadcrumb = [x for x in breadcrumb if x]
 
     content_text = extract_main_ad_text(soup)
-
     resolved_uadid = fallback.get("uadid") or extract_uadid_from_url(page_url)
 
     return {
         "uadid": resolved_uadid,
         "title": title or fallback.get("title") or "",
-        "seller_name": seller_name or fallback.get("listing_seller") or "",
+        "seller_name": seller_name,
         "seller_url": seller_url,
         "date": date_text or None,
         "price": price or fallback.get("price") or None,
@@ -482,12 +447,7 @@ def ensure_output_files(base_output: Path) -> Tuple[Path, Path, Path]:
 def load_visited(visited_file: Path) -> Set[str]:
     if not visited_file.exists():
         return set()
-
-    return {
-        line.strip()
-        for line in visited_file.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    }
+    return {line.strip() for line in visited_file.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
 def append_visited(visited_file: Path, ad_key_value: str) -> None:
@@ -498,51 +458,38 @@ def append_visited(visited_file: Path, ad_key_value: str) -> None:
 def read_tail_text(path: Path, max_bytes: int = 1024 * 1024) -> str:
     if not path.exists():
         return ""
-
     size = path.stat().st_size
-
     with path.open("rb") as f:
         if size > max_bytes:
             f.seek(size - max_bytes)
         data = f.read()
-
     return data.decode("utf-8", errors="ignore")
 
 
 def read_head_text(path: Path, max_bytes: int = 1024 * 1024) -> str:
     if not path.exists():
         return ""
-
     with path.open("rb") as f:
         data = f.read(max_bytes)
-
     return data.decode("utf-8", errors="ignore")
 
 
 def file_looks_closed_json(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
-
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-
         if not isinstance(data, dict):
             return False
-
         if data.get("origin") != ORIGIN_NAME:
             return False
-
-        comments = data.get("comments")
-        if not isinstance(comments, list):
+        if not isinstance(data.get("comments"), list):
             return False
-
-        extra = data.get("data", {}).get("extra", {})
+        extra = data.get("extra", {})
         if not isinstance(extra, dict):
             return False
-
         return extra.get("scrape_status") == "finished"
-
     except Exception:
         return False
 
@@ -550,53 +497,38 @@ def file_looks_closed_json(path: Path) -> bool:
 def file_has_any_saved_comment(path: Path) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
-
     text = read_head_text(path, max_bytes=2 * 1024 * 1024)
     marker = '"comments": ['
-
     idx = text.find(marker)
-
     if idx == -1:
         return False
-
     after = text[idx + len(marker):].lstrip()
-
-    if not after:
-        return False
-
-    return after.startswith("{") or '"comment_id"' in after or '"url"' in after
+    return bool(after and (after.startswith("{") or '"comment_id"' in after or '"url"' in after))
 
 
 def find_last_url_from_file(path: Path) -> Optional[str]:
     if not path.exists() or path.stat().st_size == 0:
         return None
-
     text = read_tail_text(path, max_bytes=2 * 1024 * 1024)
     matches = URL_FIELD_RE.findall(text)
-
     return matches[-1] if matches else None
 
 
 def find_last_comment_id_from_file(path: Path) -> Optional[str]:
     if not path.exists() or path.stat().st_size == 0:
         return None
-
     text = read_tail_text(path, max_bytes=2 * 1024 * 1024)
     matches = COMMENT_ID_RE.findall(text)
-
     return matches[-1] if matches else None
 
 
 def find_last_offset_from_file(path: Path) -> Optional[int]:
     if not path.exists() or path.stat().st_size == 0:
         return None
-
     text = read_tail_text(path, max_bytes=2 * 1024 * 1024)
     matches = LAST_OFFSET_FIELD_RE.findall(text)
-
     if not matches:
         return None
-
     try:
         return int(matches[-1])
     except Exception:
@@ -606,13 +538,10 @@ def find_last_offset_from_file(path: Path) -> Optional[int]:
 def count_existing_comments_in_file(path: Path) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
-
     count = 0
-
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             count += line.count('"comment_id":')
-
     return count
 
 
@@ -653,22 +582,14 @@ def init_open_json_file_if_needed(json_file: Path) -> None:
         os.fsync(f.fileno())
 
 
-def append_comment_to_open_json(
-    json_file: Path,
-    comment: Dict,
-    first_comment_already_written: bool,
-) -> bool:
+def append_comment_to_open_json(json_file: Path, comment: Dict, first_comment_already_written: bool) -> bool:
     with json_file.open("a", encoding="utf-8") as f:
         if first_comment_already_written:
             f.write(",\n")
-
         comment_json = json.dumps(comment, ensure_ascii=False, indent=4)
-        indented = "    " + comment_json.replace("\n", "\n    ")
-        f.write(indented)
-
+        f.write("    " + comment_json.replace("\n", "\n    "))
         f.flush()
         os.fsync(f.fileno())
-
     return True
 
 
@@ -679,55 +600,42 @@ def close_json_file(json_file: Path, saved_count: int, last_offset: int) -> None
         "last_offset": last_offset,
         "date_modified": now_local_iso(),
     }
-
     with json_file.open("a", encoding="utf-8") as f:
         f.write("\n  ],\n")
         f.write('  "extra": ')
         f.write(json.dumps(closing_data, ensure_ascii=False, indent=2).replace("\n", "\n  "))
-        f.write("\n")
-        f.write("}\n")
+        f.write("\n}\n")
         f.flush()
         os.fsync(f.fileno())
 
 
 def ad_key(ad: Dict) -> str:
     uadid = clean_text(str(ad.get("uadid") or ""))
-
     if uadid:
         return f"uadid:{uadid}"
-
     url = clean_text(ad.get("url") or "")
-
     if url:
         return f"url:{url}"
-
     title = clean_text(ad.get("title") or "")
     return f"title:{title}"
 
 
-def split_author_name(name: str) -> Dict[str, str]:
+def normalize_author(name: str) -> Dict[str, str]:
     name = clean_text(name)
-
     if not name:
-        return {
-            "name": "",
-        }
-
-    return {
-        "name": name,
-    }
+        return {"name": ""}
+    return {"name": name}
 
 
 def normalize_ad_as_comment(ad: Dict, offset: int, list_url: str, index_total: Optional[int]) -> Dict:
     uadid = clean_text(str(ad.get("uadid") or "")) or None
     title = clean_text(ad.get("title") or "")
     seller_name = clean_text(ad.get("seller_name") or "")
-
     comment_id = uadid or sanitize_filename(title)
 
     authors = []
     if seller_name:
-        authors.append(split_author_name(seller_name))
+        authors.append(normalize_author(seller_name))
 
     return {
         "authors": authors,
@@ -748,7 +656,6 @@ def normalize_ad_as_comment(ad: Dict, offset: int, list_url: str, index_total: O
             "index": int(uadid) if uadid and uadid.isdigit() else None,
             "index_total": index_total,
             "is_offtopic": False,
-
             "title": title,
             "seller_name": seller_name or None,
             "seller_url": ad.get("seller_url"),
@@ -765,18 +672,12 @@ def normalize_ad_as_comment(ad: Dict, offset: int, list_url: str, index_total: O
     }
 
 
-def scrape_single_ad(
-    driver: webdriver.Chrome,
-    ad_meta: Dict[str, Optional[str]],
-    delay: float,
-) -> Dict:
+def scrape_single_ad(driver: webdriver.Chrome, ad_meta: Dict[str, Optional[str]], delay: float) -> Dict:
     ad_url = ad_meta["url"]
-
     if not ad_url:
         raise ValueError("Hiányzó hirdetés URL.")
 
     print(f"[DEBUG] Hirdetés megnyitása: {ad_url}")
-
     driver.get(ad_url)
     wait_ready(driver)
     dismiss_known_popups(driver, first_page=False)
@@ -784,7 +685,6 @@ def scrape_single_ad(
     time.sleep(delay)
 
     details = extract_ad_details(driver.page_source, driver.current_url, ad_meta)
-
     preview = clean_text((details.get("content") or "")[:160]).replace("\n", " | ")
 
     print(
@@ -797,13 +697,7 @@ def scrape_single_ad(
     return details
 
 
-def scrape_all_offsets(
-    output_dir: str,
-    delay: float,
-    headless: bool,
-    start_offset: int,
-    max_empty_offsets: int,
-) -> None:
+def scrape_all_offsets(output_dir: str, delay: float, headless: bool, start_offset: int, max_empty_offsets: int) -> None:
     base_output = Path(output_dir).expanduser().resolve()
     _, json_file, visited_file = ensure_output_files(base_output)
 
@@ -815,11 +709,9 @@ def scrape_all_offsets(
     init_open_json_file_if_needed(json_file)
 
     driver = setup_driver(headless=headless)
-
     visited = load_visited(visited_file)
     first_comment_already_written = file_has_any_saved_comment(json_file)
     total_saved = count_existing_comments_in_file(json_file)
-
     empty_offsets_seen = 0
     first_page = True
 
@@ -831,18 +723,14 @@ def scrape_all_offsets(
         start_offset = resume_offset
 
     print(f"[INFO] Már mentett hirdetések a fájlban: {total_saved}")
-
     if last_comment_id:
         print(f"[INFO] Utolsó mentett comment_id: {last_comment_id}")
-
     if last_url:
         print(f"[INFO] Utolsó mentett URL: {last_url}")
-
     print(f"[INFO] Induló offset: {start_offset}")
 
     try:
         offset = start_offset
-
         while True:
             list_url = build_list_url(offset)
             print(f"\n[INFO] Listaoldal megnyitása: {list_url}")
@@ -858,15 +746,10 @@ def scrape_all_offsets(
                     wait_for_listing_page(driver)
                 elif page_has_no_results(driver):
                     empty_offsets_seen += 1
-                    print(
-                        f"[INFO] Nincs találat ezen az offseten: {offset} | "
-                        f"üres oldalak egymás után: {empty_offsets_seen}"
-                    )
-
+                    print(f"[INFO] Nincs találat ezen az offseten: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
                     if empty_offsets_seen >= max_empty_offsets:
                         print("[INFO] Több egymás utáni üres oldal után leállok.")
                         break
-
                     offset += 100
                     continue
                 else:
@@ -875,10 +758,8 @@ def scrape_all_offsets(
                     except TimeoutException:
                         empty_offsets_seen += 1
                         print(f"[WARN] Nem találtam hirdetéslistát ezen az oldalon: {offset}")
-
                         if empty_offsets_seen >= max_empty_offsets:
                             break
-
                         offset += 100
                         continue
 
@@ -888,22 +769,18 @@ def scrape_all_offsets(
                 continue
 
             ads = parse_listing_ads(driver.page_source, driver.current_url)
-
             print(f"[INFO] Talált hirdetések száma ezen az oldalon: {len(ads)}")
 
             if not ads:
                 empty_offsets_seen += 1
                 print(f"[INFO] Üres listaoldal: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
-
                 if empty_offsets_seen >= max_empty_offsets:
                     print("[INFO] Több egymás utáni üres oldal miatt leállok.")
                     break
-
                 offset += 100
                 continue
 
             empty_offsets_seen = 0
-
             skip_until_last = bool(total_saved > 0 and (last_comment_id or last_url) and offset == start_offset)
             seen_last_marker = False
             saved_on_this_page = 0
@@ -914,17 +791,9 @@ def scrape_all_offsets(
                 current_url = clean_text(ad_meta.get("url") or "")
 
                 if skip_until_last and not seen_last_marker:
-                    if (
-                        last_comment_id
-                        and current_uadid
-                        and current_uadid == last_comment_id
-                    ) or (
-                        last_url
-                        and current_url == last_url
-                    ):
+                    if (last_comment_id and current_uadid and current_uadid == last_comment_id) or (last_url and current_url == last_url):
                         seen_last_marker = True
                         print(f"[INFO] Resume marker megtalálva: {current_uadid or current_url}")
-
                     continue
 
                 if (
@@ -939,13 +808,7 @@ def scrape_all_offsets(
 
                 try:
                     scraped = scrape_single_ad(driver, ad_meta, delay)
-                    output_comment = normalize_ad_as_comment(
-                        scraped,
-                        offset=offset,
-                        list_url=list_url,
-                        index_total=None,
-                    )
-
+                    output_comment = normalize_ad_as_comment(scraped, offset=offset, list_url=list_url, index_total=None)
                     first_comment_already_written = append_comment_to_open_json(
                         json_file,
                         output_comment,
@@ -953,27 +816,22 @@ def scrape_all_offsets(
                     )
 
                     key = ad_key(scraped)
-
                     append_visited(visited_file, key)
                     visited.add(key)
 
                     if scraped.get("uadid"):
                         visited.add(f"uadid:{scraped['uadid']}")
-
                     if scraped.get("url"):
                         visited.add(f"url:{scraped['url']}")
 
                     total_saved += 1
                     saved_on_this_page += 1
-
                     print(f"[INFO] Hirdetés appendelve | összes mentett eddig: {total_saved}")
 
                 except TimeoutException:
                     print(f"[WARN] Timeout a hirdetésnél: {ad_meta.get('url')}")
-
                 except WebDriverException as e:
                     print(f"[WARN] Selenium hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
-
                 except Exception as e:
                     print(f"[WARN] Váratlan hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
 
@@ -983,20 +841,14 @@ def scrape_all_offsets(
                     dismiss_known_popups(driver, first_page=False)
                     wait_for_listing_page(driver)
                     time.sleep(delay)
-
                 except Exception as e:
                     print(f"[WARN] Nem sikerült visszamenni a listaoldalra: {e}")
                     break
 
-            print(
-                f"[INFO] Oldal kész | offset={offset} | "
-                f"újonnan mentett hirdetések ezen az oldalon: {saved_on_this_page}"
-            )
-
+            print(f"[INFO] Oldal kész | offset={offset} | újonnan mentett hirdetések ezen az oldalon: {saved_on_this_page}")
             offset += 100
 
         close_json_file(json_file, saved_count=total_saved, last_offset=max(start_offset, offset - 100))
-
         print(f"[INFO] Kész. JSON lezárva: {json_file} | összes mentett hirdetés: {total_saved}")
 
     finally:
@@ -1007,40 +859,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="HardverApró scraper Hoxa-szerű JSON formátummal, comments tömbbe mentve."
     )
-
     parser.add_argument(
         "--output",
         default=".",
         help="Kimeneti alapmappa. Ide jön létre a hardverapro mappa. Alapértelmezett: aktuális mappa.",
     )
-
-    parser.add_argument(
-        "--start-offset",
-        type=int,
-        default=0,
-        help="Kezdő offset. Alapértelmezett: 0.",
-    )
-
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=1.5,
-        help="Várakozás oldalak között másodpercben.",
-    )
-
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Headless mód.",
-    )
-
+    parser.add_argument("--start-offset", type=int, default=0, help="Kezdő offset. Alapértelmezett: 0.")
+    parser.add_argument("--delay", type=float, default=1.5, help="Várakozás oldalak között másodpercben.")
+    parser.add_argument("--headless", action="store_true", help="Headless mód.")
     parser.add_argument(
         "--max-empty-offsets",
         type=int,
         default=3,
         help="Ennyi egymás utáni üres offset után áll le. Alapértelmezett: 3.",
     )
-
     return parser.parse_args()
 
 
