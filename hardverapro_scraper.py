@@ -16,16 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import (
-    StaleElementReferenceException,
-    TimeoutException,
-    WebDriverException,
-)
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 BASE_LIST_URL = "https://hardverapro.hu/aprok/index.html?offset={offset}"
 START_URL = BASE_LIST_URL.format(offset=0)
@@ -86,143 +77,72 @@ def now_local_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def setup_driver(headless: bool = False, page_load_timeout: int = 20) -> webdriver.Chrome:
-    options = Options()
-
-    # FONTOS GYORSÍTÁS:
-    # normal helyett eager: nem várja meg az összes kép/reklám/tracker betöltését,
-    # csak azt, hogy a DOM már olvasható legyen.
-    options.page_load_strategy = "eager"
-
-    if headless:
-        options.add_argument("--headless=new")
-
-    options.add_argument("--window-size=1600,1200")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--lang=hu-HU")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-sync")
-    options.add_argument("--metrics-recording-only")
-    options.add_argument("--mute-audio")
-
-    # Képek tiltása: scraperhez nem kell, viszont sok időt visz el.
-    options.add_experimental_option(
-        "prefs",
-        {
-            "profile.managed_default_content_settings.images": 2,
-            "profile.default_content_setting_values.notifications": 2,
-        },
-    )
-
-    driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(page_load_timeout)
-    return driver
-
-
-def wait_ready(driver: webdriver.Chrome, timeout: int = 8) -> None:
-    # eager page load mellett elég az interactive vagy complete állapot.
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
-    )
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-
-
-def safe_click(driver: webdriver.Chrome, element) -> bool:
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.05)
-        try:
-            element.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", element)
-        return True
-    except Exception:
-        return False
-
-
-def click_first_visible(driver: webdriver.Chrome, xpaths: List[str], timeout: float = 0.7) -> bool:
-    end_time = time.time() + timeout
+def click_first_visible(page: Page, xpaths: List[str], timeout_sec: float = 0.7) -> bool:
+    end_time = time.time() + timeout_sec
     while time.time() < end_time:
         for xpath in xpaths:
             try:
-                elements = driver.find_elements(By.XPATH, xpath)
-            except Exception:
-                elements = []
-
-            for element in elements:
-                try:
-                    if not element.is_displayed():
-                        continue
-                except StaleElementReferenceException:
-                    continue
-
-                if safe_click(driver, element):
-                    time.sleep(0.15)
+                # Playwright gyorsabban kiértékel, ha a locator-t használjuk
+                loc = page.locator(f"xpath={xpath}").first
+                if loc.is_visible():
+                    # Force click segít, ha valami félig takarja az elemet
+                    loc.click(force=True, timeout=500)
+                    page.wait_for_timeout(150)
                     return True
-        time.sleep(0.05)
+            except Exception:
+                pass
+        page.wait_for_timeout(50)
     return False
 
 
-def reject_cookies(driver: webdriver.Chrome, timeout: float = 2.0) -> bool:
+def reject_cookies(page: Page, timeout: float = 2.0) -> bool:
     xpaths = [
         "//*[self::button or self::a or self::span][normalize-space()='NEM FOGADOM EL']",
         "//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyzáéíóöőúüű', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÖŐÚÜŰ'), 'NEM FOGADOM EL')]",
         "//*[contains(@class,'cookie')]//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyzáéíóöőúüű', 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÖŐÚÜŰ'), 'NEM FOGADOM EL')]",
     ]
-    clicked = click_first_visible(driver, xpaths, timeout=timeout)
+    clicked = click_first_visible(page, xpaths, timeout_sec=timeout)
     if clicked:
         print("[DEBUG] Sütik elutasítva.")
     return clicked
 
 
-def close_skip_popup(driver: webdriver.Chrome, timeout: float = 0.4) -> bool:
+def close_skip_popup(page: Page, timeout: float = 0.4) -> bool:
     xpaths = [
         "//*[self::button or self::a or self::span][normalize-space()='Lemaradok']",
         "//*[contains(normalize-space(), 'Lemaradok')]",
         "//input[@type='button' and @value='Lemaradok']",
     ]
-    clicked = click_first_visible(driver, xpaths, timeout=timeout)
+    clicked = click_first_visible(page, xpaths, timeout_sec=timeout)
     if clicked:
         print("[DEBUG] Lemaradok popup bezárva.")
     return clicked
 
 
-def dismiss_known_popups(driver: webdriver.Chrome, first_page: bool = False, popup_timeout: float = 0.4) -> None:
-    # Régen ez minden oldalnál akár 3 mp-et várt feleslegesen.
-    # Most csak röviden néz rá, mert ha nincs popup, nem kell másodperceket elvesztegetni.
+def dismiss_known_popups(page: Page, first_page: bool = False, popup_timeout: float = 0.4) -> None:
     if first_page:
-        reject_cookies(driver, timeout=max(1.0, popup_timeout))
-    close_skip_popup(driver, timeout=popup_timeout)
+        reject_cookies(page, timeout=max(1.0, popup_timeout))
+    close_skip_popup(page, timeout=popup_timeout)
 
 
-def wait_for_listing_page(driver: webdriver.Chrome, timeout: int = 8) -> None:
-    selector = ", ".join(
-        [
-            "li.media[data-uadid] h1 a[href*='/aprok/']",
-            "li.media[data-uadid] a[href*='/aprok/'][href$='.html']",
-            "main li.media[data-uadid]",
-        ]
-    )
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-    )
-
-def page_has_ads(driver: webdriver.Chrome) -> bool:
+def wait_for_listing_page(page: Page, timeout: int = 8) -> None:
+    selector = "li.media[data-uadid] h1 a[href*='/aprok/'], li.media[data-uadid] a[href*='/aprok/'][href$='.html'], main li.media[data-uadid]"
     try:
-        return len(driver.find_elements(By.CSS_SELECTOR, "li.media[data-uadid]")) > 0
+        page.wait_for_selector(selector, state="attached", timeout=timeout * 1000)
+    except PlaywrightTimeoutError:
+        pass
+
+
+def page_has_ads(page: Page) -> bool:
+    try:
+        return page.locator("li.media[data-uadid]").count() > 0
     except Exception:
         return False
 
 
-def page_has_no_results(driver: webdriver.Chrome) -> bool:
+def page_has_no_results(page: Page) -> bool:
     try:
-        body_text = clean_text(driver.find_element(By.TAG_NAME, "body").text).lower()
+        body_text = page.locator("body").inner_text().lower()
     except Exception:
         return False
     phrases = ["nincs találat", "nem található hirdetés", "nincs több hirdetés", "nincsenek hirdetések"]
@@ -274,19 +194,13 @@ def parse_listing_ads(html: str, page_url: str) -> List[Dict[str, Optional[str]]
     return ads
 
 
-def wait_for_ad_page(driver: webdriver.Chrome, timeout: int = 8) -> None:
-    selector = ", ".join(
-        [
-            "div.uad-content div.mb-3.trif-content",
-            "div.uad-content",
-            "div.uad-content-block",
-            "div.trif-content",
-            "a[href*='/aprok/hirdeto/']",
-        ]
-    )
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-    )
+def wait_for_ad_page(page: Page, timeout: int = 8) -> None:
+    selector = "div.uad-content div.mb-3.trif-content, div.uad-content, div.uad-content-block, div.trif-content, a[href*='/aprok/hirdeto/']"
+    try:
+        page.wait_for_selector(selector, state="attached", timeout=timeout * 1000)
+    except PlaywrightTimeoutError:
+        pass
+
 
 def extract_uadid_from_url(url: str) -> Optional[str]:
     if not url:
@@ -359,8 +273,6 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
     seller_name = ""
     seller_url = None
 
-    # Végtelenül leegyszerűsített keresés, ami pontosan azt csinálja, amit kértél: 
-    # Megkeresi a "Hirdető" feliratot, és a közvetlenül mellette lévő linket veszi ki.
     hirdeto_nodes = soup.find_all(string=re.compile(r"Hirdető"))
     for node in hirdeto_nodes:
         parent = node.parent
@@ -466,6 +378,7 @@ def extract_ad_details(html: str, page_url: str, fallback: Dict[str, Optional[st
         "details": details_map,
         "breadcrumb": breadcrumb,
     }
+
 
 def ensure_output_files(base_output: Path) -> Tuple[Path, Path, Path]:
     hardverapro_dir = base_output / "hardverapro"
@@ -709,7 +622,7 @@ def normalize_ad_as_comment(ad: Dict, offset: int, list_url: str, index_total: O
     }
 
 
-def scrape_single_ad(driver: webdriver.Chrome, ad_meta: Dict[str, Optional[str]], delay: float, page_timeout: int, popup_timeout: float) -> Dict:
+def scrape_single_ad(page: Page, ad_meta: Dict[str, Optional[str]], delay: float, page_timeout: int, popup_timeout: float) -> Dict:
     ad_url = ad_meta["url"]
     if not ad_url:
         raise ValueError("Hiányzó hirdetés URL.")
@@ -718,22 +631,25 @@ def scrape_single_ad(driver: webdriver.Chrome, ad_meta: Dict[str, Optional[str]]
     t0 = time.perf_counter()
 
     try:
-        driver.get(ad_url)
-    except TimeoutException:
+        # A Playwright "domcontentloaded" beállítása megegyezik a Selenium "eager" stratégiájával
+        page.goto(ad_url, wait_until="domcontentloaded", timeout=page_timeout * 1000)
+    except PlaywrightTimeoutError:
         print(f"[WARN] Page-load timeout, de megpróbálom feldolgozni: {ad_url}")
 
     t_get = time.perf_counter()
-    wait_ready(driver, timeout=page_timeout)
-    t_ready = time.perf_counter()
-    dismiss_known_popups(driver, first_page=False, popup_timeout=popup_timeout)
+    dismiss_known_popups(page, first_page=False, popup_timeout=popup_timeout)
     t_popup = time.perf_counter()
-    wait_for_ad_page(driver, timeout=page_timeout)
+    wait_for_ad_page(page, timeout=page_timeout)
     t_wait = time.perf_counter()
 
     if delay > 0:
         time.sleep(delay)
 
-    details = extract_ad_details(driver.page_source, driver.current_url, ad_meta)
+    # Oldal HTML tartalmának és URL-jének kinyerése
+    page_source = page.content()
+    current_url = page.url
+
+    details = extract_ad_details(page_source, current_url, ad_meta)
     t_extract = time.perf_counter()
     preview = clean_text((details.get("content") or "")[:160]).replace("\n", " | ")
 
@@ -744,10 +660,9 @@ def scrape_single_ad(driver: webdriver.Chrome, ad_meta: Dict[str, Optional[str]]
         f"preview={preview or '<üres>'}"
     )
     print(
-        "[TIME] ad_get={:.2f}s | ready={:.2f}s | popup={:.2f}s | wait_ad={:.2f}s | extract+delay={:.2f}s | total={:.2f}s".format(
+        "[TIME] ad_get={:.2f}s | popup={:.2f}s | wait_ad={:.2f}s | extract+delay={:.2f}s | total={:.2f}s".format(
             t_get - t0,
-            t_ready - t_get,
-            t_popup - t_ready,
+            t_popup - t_get,
             t_wait - t_popup,
             t_extract - t_wait,
             t_extract - t0,
@@ -768,7 +683,6 @@ def scrape_all_offsets(output_dir: str, delay: float, headless: bool, start_offs
 
     init_open_json_file_if_needed(json_file)
 
-    driver = setup_driver(headless=headless, page_load_timeout=page_timeout)
     visited = load_visited(visited_file)
     first_comment_already_written = file_has_any_saved_comment(json_file)
     total_saved = count_existing_comments_in_file(json_file)
@@ -789,127 +703,150 @@ def scrape_all_offsets(output_dir: str, delay: float, headless: bool, start_offs
         print(f"[INFO] Utolsó mentett URL: {last_url}")
     print(f"[INFO] Induló offset: {start_offset}")
 
-    try:
-        offset = start_offset
-        while True:
-            list_url = build_list_url(offset)
-            print(f"\n[INFO] Listaoldal megnyitása: {list_url}")
+    # Playwright indítása
+    with sync_playwright() as p:
+        # A böngésző paraméterei optimalizálva sebességre és szerveres futtatásra
+        browser_args = [
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--mute-audio"
+        ]
+        
+        browser = p.chromium.launch(headless=headless, args=browser_args)
+        context = browser.new_context(
+            viewport={'width': 1600, 'height': 1200},
+            locale='hu-HU'
+        )
+        
+        # Képek letöltésének blokkolása hálózat szinten (gyorsítja az oldalbetöltést)
+        context.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
 
-            try:
-                driver.get(list_url)
-                wait_ready(driver, timeout=page_timeout)
-                dismiss_known_popups(driver, first_page=first_page, popup_timeout=popup_timeout)
-                first_page = False
-                if delay > 0:
-                    time.sleep(delay)
+        page = context.new_page()
+        # Beállítjuk a default timeoutot
+        page.set_default_timeout(page_timeout * 1000)
 
-                if page_has_ads(driver):
-                    wait_for_listing_page(driver, timeout=page_timeout)
-                elif page_has_no_results(driver):
-                    empty_offsets_seen += 1
-                    print(f"[INFO] Nincs találat ezen az offseten: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
-                    if empty_offsets_seen >= max_empty_offsets:
-                        print("[INFO] Több egymás utáni üres oldal után leállok.")
-                        break
-                    offset += 100
-                    continue
-                else:
-                    try:
-                        wait_for_listing_page(driver, timeout=min(5, page_timeout))
-                    except TimeoutException:
+        try:
+            offset = start_offset
+            while True:
+                list_url = build_list_url(offset)
+                print(f"\n[INFO] Listaoldal megnyitása: {list_url}")
+
+                try:
+                    page.goto(list_url, wait_until="domcontentloaded", timeout=page_timeout * 1000)
+                    dismiss_known_popups(page, first_page=first_page, popup_timeout=popup_timeout)
+                    first_page = False
+                    if delay > 0:
+                        time.sleep(delay)
+
+                    if page_has_ads(page):
+                        wait_for_listing_page(page, timeout=page_timeout)
+                    elif page_has_no_results(page):
                         empty_offsets_seen += 1
-                        print(f"[WARN] Nem találtam hirdetéslistát ezen az oldalon: {offset}")
+                        print(f"[INFO] Nincs találat ezen az offseten: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
                         if empty_offsets_seen >= max_empty_offsets:
+                            print("[INFO] Több egymás utáni üres oldal után leállok.")
                             break
                         offset += 100
                         continue
+                    else:
+                        try:
+                            wait_for_listing_page(page, timeout=min(5, page_timeout))
+                        except PlaywrightTimeoutError:
+                            empty_offsets_seen += 1
+                            print(f"[WARN] Nem találtam hirdetéslistát ezen az oldalon: {offset}")
+                            if empty_offsets_seen >= max_empty_offsets:
+                                break
+                            offset += 100
+                            continue
 
-            except TimeoutException:
-                print(f"[WARN] Timeout a listaoldal betöltésénél: {list_url}")
-                offset += 100
-                continue
-
-            ads = parse_listing_ads(driver.page_source, driver.current_url)
-            print(f"[INFO] Talált hirdetések száma ezen az oldalon: {len(ads)}")
-
-            if not ads:
-                empty_offsets_seen += 1
-                print(f"[INFO] Üres listaoldal: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
-                if empty_offsets_seen >= max_empty_offsets:
-                    print("[INFO] Több egymás utáni üres oldal miatt leállok.")
-                    break
-                offset += 100
-                continue
-
-            empty_offsets_seen = 0
-            skip_until_last = bool(total_saved > 0 and (last_comment_id or last_url) and offset == start_offset)
-            seen_last_marker = False
-            saved_on_this_page = 0
-
-            for idx, ad_meta in enumerate(ads, start=1):
-                current_key = ad_key(ad_meta)
-                current_uadid = clean_text(str(ad_meta.get("uadid") or ""))
-                current_url = clean_text(ad_meta.get("url") or "")
-
-                if skip_until_last and not seen_last_marker:
-                    if (last_comment_id and current_uadid and current_uadid == last_comment_id) or (last_url and current_url == last_url):
-                        seen_last_marker = True
-                        print(f"[INFO] Resume marker megtalálva: {current_uadid or current_url}")
+                except PlaywrightTimeoutError:
+                    print(f"[WARN] Timeout a listaoldal betöltésénél: {list_url}")
+                    offset += 100
                     continue
 
-                if (
-                    current_key in visited
-                    or (current_uadid and f"uadid:{current_uadid}" in visited)
-                    or (current_url and f"url:{current_url}" in visited)
-                ):
-                    print(f"[INFO] ({idx}/{len(ads)}) Már mentve, kihagyva: {ad_meta.get('title')}")
+                ads = parse_listing_ads(page.content(), page.url)
+                print(f"[INFO] Talált hirdetések száma ezen az oldalon: {len(ads)}")
+
+                if not ads:
+                    empty_offsets_seen += 1
+                    print(f"[INFO] Üres listaoldal: {offset} | üres oldalak egymás után: {empty_offsets_seen}")
+                    if empty_offsets_seen >= max_empty_offsets:
+                        print("[INFO] Több egymás utáni üres oldal miatt leállok.")
+                        break
+                    offset += 100
                     continue
 
-                print(f"\n[INFO] ({idx}/{len(ads)}) Hirdetés feldolgozása: {ad_meta.get('title')}")
+                empty_offsets_seen = 0
+                skip_until_last = bool(total_saved > 0 and (last_comment_id or last_url) and offset == start_offset)
+                seen_last_marker = False
+                saved_on_this_page = 0
 
-                try:
-                    scraped = scrape_single_ad(driver, ad_meta, delay, page_timeout=page_timeout, popup_timeout=popup_timeout)
-                    output_comment = normalize_ad_as_comment(scraped, offset=offset, list_url=list_url, index_total=None)
-                    first_comment_already_written = append_comment_to_open_json(
-                        json_file,
-                        output_comment,
-                        first_comment_already_written,
-                        do_fsync=do_fsync,
-                    )
+                for idx, ad_meta in enumerate(ads, start=1):
+                    current_key = ad_key(ad_meta)
+                    current_uadid = clean_text(str(ad_meta.get("uadid") or ""))
+                    current_url = clean_text(ad_meta.get("url") or "")
 
-                    key = ad_key(scraped)
-                    append_visited(visited_file, key)
-                    visited.add(key)
+                    if skip_until_last and not seen_last_marker:
+                        if (last_comment_id and current_uadid and current_uadid == last_comment_id) or (last_url and current_url == last_url):
+                            seen_last_marker = True
+                            print(f"[INFO] Resume marker megtalálva: {current_uadid or current_url}")
+                        continue
 
-                    if scraped.get("uadid"):
-                        visited.add(f"uadid:{scraped['uadid']}")
-                    if scraped.get("url"):
-                        visited.add(f"url:{scraped['url']}")
+                    if (
+                        current_key in visited
+                        or (current_uadid and f"uadid:{current_uadid}" in visited)
+                        or (current_url and f"url:{current_url}" in visited)
+                    ):
+                        print(f"[INFO] ({idx}/{len(ads)}) Már mentve, kihagyva: {ad_meta.get('title')}")
+                        continue
 
-                    total_saved += 1
-                    saved_on_this_page += 1
-                    print(f"[INFO] Hirdetés appendelve | összes mentett eddig: {total_saved}")
+                    print(f"\n[INFO] ({idx}/{len(ads)}) Hirdetés feldolgozása: {ad_meta.get('title')}")
 
-                except TimeoutException:
-                    print(f"[WARN] Timeout a hirdetésnél: {ad_meta.get('url')}")
-                except WebDriverException as e:
-                    print(f"[WARN] Selenium hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
-                except Exception as e:
-                    print(f"[WARN] Váratlan hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
+                    try:
+                        scraped = scrape_single_ad(page, ad_meta, delay, page_timeout=page_timeout, popup_timeout=popup_timeout)
+                        output_comment = normalize_ad_as_comment(scraped, offset=offset, list_url=list_url, index_total=None)
+                        first_comment_already_written = append_comment_to_open_json(
+                            json_file,
+                            output_comment,
+                            first_comment_already_written,
+                            do_fsync=do_fsync,
+                        )
 
-            print(f"[INFO] Oldal kész | offset={offset} | újonnan mentett hirdetések ezen az oldalon: {saved_on_this_page}")
-            offset += 100
+                        key = ad_key(scraped)
+                        append_visited(visited_file, key)
+                        visited.add(key)
 
-        close_json_file(json_file, saved_count=total_saved, last_offset=max(start_offset, offset - 100))
-        print(f"[INFO] Kész. JSON lezárva: {json_file} | összes mentett hirdetés: {total_saved}")
+                        if scraped.get("uadid"):
+                            visited.add(f"uadid:{scraped['uadid']}")
+                        if scraped.get("url"):
+                            visited.add(f"url:{scraped['url']}")
 
-    finally:
-        driver.quit()
+                        total_saved += 1
+                        saved_on_this_page += 1
+                        print(f"[INFO] Hirdetés appendelve | összes mentett eddig: {total_saved}")
+
+                    except PlaywrightTimeoutError:
+                        print(f"[WARN] Timeout a hirdetésnél: {ad_meta.get('url')}")
+                    except PlaywrightError as e:
+                        print(f"[WARN] Playwright hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
+                    except Exception as e:
+                        print(f"[WARN] Váratlan hiba a hirdetésnél: {ad_meta.get('url')} | {e}")
+
+                print(f"[INFO] Oldal kész | offset={offset} | újonnan mentett hirdetések ezen az oldalon: {saved_on_this_page}")
+                offset += 100
+
+            close_json_file(json_file, saved_count=total_saved, last_offset=max(start_offset, offset - 100))
+            print(f"[INFO] Kész. JSON lezárva: {json_file} | összes mentett hirdetés: {total_saved}")
+
+        finally:
+            browser.close()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="HardverApró scraper Hoxa-szerű JSON formátummal, comments tömbbe mentve."
+        description="HardverApró scraper Hoxa-szerű JSON formátummal, comments tömbbe mentve (Playwright motorral)."
     )
     parser.add_argument(
         "--output",
@@ -960,3 +897,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    #python hardverapro_scraper.py --output . --delay 1 --headless
