@@ -90,8 +90,8 @@ def ensure_dirs(base_output: Path) -> Path:
     return index_dir
 
 
-def ensure_root_visited_file(index_dir: Path) -> Path:
-    visited = index_dir / "visited_topics.txt"
+def ensure_visited_file(index_dir: Path, filename: str) -> Path:
+    visited = index_dir / filename
     if not visited.exists():
         visited.write_text("", encoding="utf-8")
     return visited
@@ -107,9 +107,17 @@ def load_visited(visited_file: Path) -> Set[str]:
     }
 
 
-def append_visited(visited_file: Path, topic_url: str) -> None:
+def append_visited(visited_file: Path, item: str) -> None:
     with visited_file.open("a", encoding="utf-8") as f:
-        f.write(topic_url.strip() + "\n")
+        f.write(item.strip() + "\n")
+
+
+def append_visited_if_missing(visited_file: Path, visited_set: Set[str], item: str) -> None:
+    item = item.strip()
+    if not item or item in visited_set:
+        return
+    append_visited(visited_file, item)
+    visited_set.add(item)
 
 
 def split_name_like_person(name: str) -> Dict[str, str]:
@@ -1258,7 +1266,7 @@ def scrape_subforum(
     delay: float,
     topic_reset_interval: int,
     subforum_reset_interval: int,
-) -> None:
+) -> bool:
     category_dir = base_index_dir / sanitize_filename(category_title)
     subforum_dir = category_dir / sanitize_filename(subforum_title)
     subforum_dir.mkdir(parents=True, exist_ok=True)
@@ -1270,6 +1278,7 @@ def scrape_subforum(
 
     current_url = subforum_url
     page_no = 1
+    all_topics_finished = True
 
     while True:
         if subforum_reset_interval > 0 and page_no > 1 and (page_no - 1) % subforum_reset_interval == 0:
@@ -1333,9 +1342,11 @@ def scrape_subforum(
                     print(f"[INFO] Mentett kommentoldalak: {saved_pages}")
                     print(f"[INFO] Topic visitedbe írva: {topic_url_norm}")
                 else:
+                    all_topics_finished = False
                     print(f"[INFO] Topic NINCS teljesen kész, ezért NEM kerül visitedbe: {topic_url_norm}")
 
             except Exception as e:
+                all_topics_finished = False
                 print(f"[WARN] Hiba topic feldolgozás közben: {topic_url} | {e}")
 
         next_url = get_subforum_next_page_url(html, final_url)
@@ -1350,6 +1361,8 @@ def scrape_subforum(
         current_url = next_url
         page_no += 1
 
+    return all_topics_finished
+
 
 def scrape_main(
     fetcher: BrowserFetcher,
@@ -1362,9 +1375,14 @@ def scrape_main(
 ) -> None:
     base_output = Path(output_dir).expanduser().resolve()
     index_dir = ensure_dirs(base_output)
-    visited_file = ensure_root_visited_file(index_dir)
+    visited_file = ensure_visited_file(index_dir, "visited_topics.txt")
+    visited_forumgroups_file = ensure_visited_file(index_dir, "visited_forumgroups.txt")
+
     visited_topics = load_visited(visited_file)
     visited_topics = {normalize_url_for_dedup(x) for x in visited_topics}
+
+    visited_forumgroups = load_visited(visited_forumgroups_file)
+    visited_forumgroups = {normalize_url_for_dedup(x) for x in visited_forumgroups}
 
     print(f"[INFO] Főoldal megnyitása: {MAIN_FORUM_URL}")
     final_url, html = fetcher.fetch(MAIN_FORUM_URL, wait_ms=int(delay * 1000))
@@ -1378,11 +1396,18 @@ def scrape_main(
 
     for cat_idx, cat in enumerate(categories, start=1):
         category_title = cat["category_title"]
+        category_url_norm = normalize_url_for_dedup(cat.get("category_url") or category_title)
 
         if only_category and only_category.lower() not in category_title.lower():
             continue
 
+        if not only_subforum and category_url_norm in visited_forumgroups:
+            print(f"\n[INFO] Fórumcsoport már teljesen feldolgozva, kihagyva: {category_title}")
+            continue
+
         print(f"\n[INFO] Fórumcsoport ({cat_idx}/{len(categories)}): {category_title}")
+        forumgroup_fully_finished = True
+        processed_subforums = 0
 
         for sub_idx, sub in enumerate(cat["subforums"], start=1):
             subforum_title = sub["title"]
@@ -1397,7 +1422,8 @@ def scrape_main(
             )
 
             try:
-                scrape_subforum(
+                processed_subforums += 1
+                subforum_finished = scrape_subforum(
                     fetcher=fetcher,
                     category_title=category_title,
                     subforum_title=subforum_title,
@@ -1409,8 +1435,21 @@ def scrape_main(
                     topic_reset_interval=topic_reset_interval,
                     subforum_reset_interval=subforum_reset_interval,
                 )
+                if not subforum_finished:
+                    forumgroup_fully_finished = False
             except Exception as e:
+                forumgroup_fully_finished = False
                 print(f"[WARN] Hiba alforum feldolgozás közben: {subforum_url} | {e}")
+
+        if not only_subforum and processed_subforums > 0 and forumgroup_fully_finished:
+            append_visited_if_missing(
+                visited_forumgroups_file,
+                visited_forumgroups,
+                category_url_norm,
+            )
+            print(f"[INFO] Fórumcsoport teljesen kész, visited_forumgroups-ba írva: {category_title} | {category_url_norm}")
+        elif not only_subforum:
+            print(f"[INFO] Fórumcsoport NINCS teljesen kész, ezért NEM kerül visited_forumgroups-ba: {category_title}")
 
         gc.collect()
 
@@ -1510,4 +1549,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-    # python index_scraper.py --output ./index --delay 2
+    # python index_scraper.py --output ./index --delay 1.5
