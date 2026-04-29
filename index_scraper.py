@@ -1376,6 +1376,11 @@ def scrape_main(
     base_output = Path(output_dir).expanduser().resolve()
     index_dir = ensure_dirs(base_output)
     visited_file = ensure_visited_file(index_dir, "visited_topics.txt")
+
+    # FONTOS:
+    # Ebben a verzióban a visited_forumgroups.txt NEM a nagy kategóriákat menti,
+    # hanem a főoldalon látható kis fórumcsoportokat / alforumokat.
+    # Példa: "Általános társalgás -> A törzsasztal"
     visited_forumgroups_file = ensure_visited_file(index_dir, "visited_forumgroups.txt")
 
     visited_topics = load_visited(visited_file)
@@ -1396,24 +1401,25 @@ def scrape_main(
 
     for cat_idx, cat in enumerate(categories, start=1):
         category_title = cat["category_title"]
-        category_url_norm = normalize_url_for_dedup(cat.get("category_url") or category_title)
 
         if only_category and only_category.lower() not in category_title.lower():
             continue
 
-        if not only_subforum and category_url_norm in visited_forumgroups:
-            print(f"\n[INFO] Fórumcsoport már teljesen feldolgozva, kihagyva: {category_title}")
-            continue
-
         print(f"\n[INFO] Fórumcsoport ({cat_idx}/{len(categories)}): {category_title}")
-        forumgroup_fully_finished = True
-        processed_subforums = 0
 
         for sub_idx, sub in enumerate(cat["subforums"], start=1):
             subforum_title = sub["title"]
             subforum_url = sub["url"]
+            subforum_url_norm = normalize_url_for_dedup(subforum_url)
 
             if only_subforum and only_subforum.lower() not in subforum_title.lower():
+                continue
+
+            if subforum_url_norm in visited_forumgroups:
+                print(
+                    f"[INFO] Kis fórumcsoport már teljesen feldolgozva, kihagyva: "
+                    f"{category_title} -> {subforum_title} | {subforum_url_norm}"
+                )
                 continue
 
             print(
@@ -1422,7 +1428,6 @@ def scrape_main(
             )
 
             try:
-                processed_subforums += 1
                 subforum_finished = scrape_subforum(
                     fetcher=fetcher,
                     category_title=category_title,
@@ -1435,24 +1440,27 @@ def scrape_main(
                     topic_reset_interval=topic_reset_interval,
                     subforum_reset_interval=subforum_reset_interval,
                 )
-                if not subforum_finished:
-                    forumgroup_fully_finished = False
+
+                if subforum_finished:
+                    append_visited_if_missing(
+                        visited_forumgroups_file,
+                        visited_forumgroups,
+                        subforum_url_norm,
+                    )
+                    print(
+                        f"[INFO] Kis fórumcsoport teljesen kész, visited_forumgroups-ba írva: "
+                        f"{category_title} -> {subforum_title} | {subforum_url_norm}"
+                    )
+                else:
+                    print(
+                        f"[INFO] Kis fórumcsoport NINCS teljesen kész, ezért NEM kerül visited_forumgroups-ba: "
+                        f"{category_title} -> {subforum_title} | {subforum_url_norm}"
+                    )
+
             except Exception as e:
-                forumgroup_fully_finished = False
                 print(f"[WARN] Hiba alforum feldolgozás közben: {subforum_url} | {e}")
 
-        if not only_subforum and processed_subforums > 0 and forumgroup_fully_finished:
-            append_visited_if_missing(
-                visited_forumgroups_file,
-                visited_forumgroups,
-                category_url_norm,
-            )
-            print(f"[INFO] Fórumcsoport teljesen kész, visited_forumgroups-ba írva: {category_title} | {category_url_norm}")
-        elif not only_subforum:
-            print(f"[INFO] Fórumcsoport NINCS teljesen kész, ezért NEM kerül visited_forumgroups-ba: {category_title}")
-
         gc.collect()
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1549,4 +1557,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-    # python index_scraper.py --output ./index --delay 1.5
+    # python index_scraper.py --output ./index --delay 2

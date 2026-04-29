@@ -24,7 +24,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-BASE_LIST_URL = "https://prohardver.hu/temak/tv_audio/listaz.php"
+BASE_LIST_URL = "https://prohardver.hu/temak/digicam/listaz.php"
 
 HSZ_URL_RE = re.compile(
     r"^(?P<prefix>https?://[^#]+?/hsz_)(?P<start>\d+)-(?P<end>\d+)(?P<suffix>\.html)(?:#msg(?P<msg>\d+))?$",
@@ -661,8 +661,8 @@ def try_go_to_next_page(driver: webdriver.Chrome, delay: float, max_empty_skips:
 
 def ensure_output_dirs(base_output: Path) -> Tuple[Path, Path, Path]:
     prohardver_dir = base_output / "prohardver"
-    tv_audio_dir = prohardver_dir / "tv_audio"
-    visited_file = prohardver_dir / "visited_tv_audio.txt"
+    tv_audio_dir = prohardver_dir / "digcam"
+    visited_file = prohardver_dir / "visited_digcam.txt"
 
     prohardver_dir.mkdir(parents=True, exist_ok=True)
     tv_audio_dir.mkdir(parents=True, exist_ok=True)
