@@ -24,7 +24,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-BASE_LIST_URL = "https://prohardver.hu/temak/digicam/listaz.php"
+BASE_LIST_URL = "https://prohardver.hu/temak/alaplap_chipset_ram/listaz.php"
 
 HSZ_URL_RE = re.compile(
     r"^(?P<prefix>https?://[^#]+?/hsz_)(?P<start>\d+)-(?P<end>\d+)(?P<suffix>\.html)(?:#msg(?P<msg>\d+))?$",
@@ -34,6 +34,46 @@ HSZ_URL_RE = re.compile(
 URL_FIELD_RE = re.compile(r'"url"\s*:\s*"([^"]+)"')
 NEXT_URL_FIELD_RE = re.compile(r'"next_resume_url"\s*:\s*(?:"([^"]+)"|null)')
 COMMENT_ID_FIELD_RE = re.compile(r'"comment_id"\s*:\s*(?:"([^"]+)"|null)')
+
+# A PROHARDVER forum DOM-ja időnként változik.
+# Régi post elem: li.media[data-id]
+# Új post elem a jelenlegi oldalon: li.message-off/message-on[data-id][data-rplid]
+MESSAGE_ITEM_SELECTOR = ", ".join(
+    [
+        "li.media[data-id]",
+        "li.message-off[data-id]",
+        "li.message-on[data-id]",
+        "li[class^='message-'][data-id]",
+        "li[class*=' message-'][data-id]",
+        "ul.message-list-desc > li[data-id]",
+    ]
+)
+
+MESSAGE_TEXT_SELECTORS = [
+    ".message-content p.mgt0",
+    ".message-content",
+    ".msg-content p.mgt0",
+    ".msg-content",
+    "p.mgt0",
+]
+
+MESSAGE_AUTHOR_SELECTORS = [
+    ".message-body-user .user-name",
+    ".message-body-user a[href*='/tag/']",
+    ".message-body-user a",
+    ".message-body-user",
+    ".msg-user",
+    ".media-left",
+]
+
+MESSAGE_HEADER_SELECTORS = [
+    ".message-head",
+    ".message-header",
+    ".msg-header",
+    "time",
+    ".msg-date",
+    ".date",
+]
 
 
 def build_list_url(offset: int) -> str:
@@ -244,13 +284,13 @@ def parse_topic_links(html: str, page_url: str) -> List[Tuple[str, str]]:
 
 def wait_for_messages(driver: webdriver.Chrome, timeout: int = 20) -> None:
     WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "li.media[data-id]"))
+        EC.presence_of_element_located((By.CSS_SELECTOR, MESSAGE_ITEM_SELECTOR))
     )
 
 
 def page_has_messages(driver: webdriver.Chrome) -> bool:
     try:
-        items = driver.find_elements(By.CSS_SELECTOR, "li.media[data-id]")
+        items = driver.find_elements(By.CSS_SELECTOR, MESSAGE_ITEM_SELECTOR)
         return len(items) > 0
     except Exception:
         return False
@@ -299,49 +339,71 @@ def extract_topic_title(driver: webdriver.Chrome, fallback: str) -> str:
 
 
 def extract_author(post) -> str:
-    header = post.select_one(".msg-header")
-    if header:
-        header_text = clean_text(header.get_text(" ", strip=True))
-        m = re.match(r"#\d+\s+(.+?)\s*>\s*.+?#\d+", header_text)
-        if m:
-            author = clean_text(m.group(1))
-            if author:
-                return author
+    # Régi layoutban a headerben is benne volt a szerző; az új layoutban
+    # a bal oldali user blokk: .message-body-user.
+    for selector in [".msg-header", ".message-head", ".message-header"]:
+        header = post.select_one(selector)
+        if header:
+            header_text = clean_text(header.get_text(" ", strip=True))
+            # Példa: #67312 Crabface > rxmiss #67311 2026-05-03 ...
+            m = re.match(r"#\d+\s+(.+?)\s*>\s*.+?#\d+", header_text)
+            if m:
+                author = clean_text(m.group(1))
+                if author:
+                    return author
 
-    for selector in [".msg-user", ".media-left"]:
+    ignored_lines = {
+        "tag", "őstag", "ostag", "senior tag", "aktív tag", "aktiv tag",
+        "félisten", "felisten", "veterán", "veteran", "addikt", "nagyúr", "nagyur",
+        "újonc", "ujonc", "csendes tag", "titán", "titan",
+    }
+
+    for selector in MESSAGE_AUTHOR_SELECTORS:
         node = post.select_one(selector)
-        if node:
-            txt = clean_text(node.get_text("\n", strip=True))
-            lines = [line.strip() for line in txt.splitlines() if line.strip()]
-            if lines:
-                return lines[0]
+        if not node:
+            continue
+        txt = clean_text(node.get_text("\n", strip=True))
+        lines = [line.strip() for line in txt.splitlines() if line.strip()]
+        for line in lines:
+            if line.lower() in ignored_lines:
+                continue
+            if line.startswith("#"):
+                continue
+            return line
 
     return "ismeretlen"
 
 
 def extract_comment_date(post) -> Optional[str]:
-    header = post.select_one(".msg-header")
-    if header:
-        header_text = clean_text(header.get_text(" ", strip=True))
-        patterns = [
-            r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b",
-            r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}\b",
-            r"\b\d{4}\.\d{2}\.\d{2}\.?(?: \d{2}:\d{2}(?::\d{2})?)?\b",
-            r"\bma,? \d{1,2}:\d{2}\b",
-            r"\btegnap,? \d{1,2}:\d{2}\b",
-        ]
+    patterns = [
+        r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b",
+        r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}\b",
+        r"\b\d{4}\.\d{2}\.\d{2}\.?(?: \d{2}:\d{2}(?::\d{2})?)?\b",
+        r"\bma,? \d{1,2}:\d{2}\b",
+        r"\btegnap,? \d{1,2}:\d{2}\b",
+    ]
+
+    for selector in MESSAGE_HEADER_SELECTORS:
+        node = post.select_one(selector)
+        if not node:
+            continue
+
+        datetime_attr = clean_text(node.get("datetime", ""))
+        if datetime_attr:
+            return datetime_attr
+
+        header_text = clean_text(node.get_text(" ", strip=True))
         for pattern in patterns:
             m = re.search(pattern, header_text, flags=re.I)
             if m:
                 return clean_text(m.group(0))
 
-    for selector in ["time", ".msg-date", ".date"]:
-        node = post.select_one(selector)
-        if not node:
-            continue
-        text = clean_text(node.get_text(" ", strip=True) or node.get("datetime", ""))
-        if text:
-            return text
+    # Utolsó fallback: néha a dátum a post teljes szövegében van.
+    full_text = clean_text(post.get_text(" ", strip=True))
+    for pattern in patterns:
+        m = re.search(pattern, full_text, flags=re.I)
+        if m:
+            return clean_text(m.group(0))
 
     return None
 
@@ -381,13 +443,17 @@ def extract_comment_likes(post) -> Tuple[Optional[int], Optional[int], Optional[
 
 
 def extract_comment_text(post) -> str:
-    for selector in [".msg-content p.mgt0", ".msg-content", "p.mgt0"]:
+    for selector in MESSAGE_TEXT_SELECTORS:
         nodes = post.select(selector)
         if not nodes:
             continue
 
         parts = []
         for node in nodes:
+            # A gombok/idézetvezérlők ne kerüljenek bele a komment szövegébe.
+            for junk in node.select("script, style, .message-body-btns, .msg-buttons, .buttons"):
+                junk.decompose()
+
             text = clean_text(node.get_text("\n", strip=True))
             if text:
                 parts.append(text)
@@ -414,10 +480,10 @@ def parse_comments_from_html(
     next_resume_url: Optional[str],
 ) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
-    posts = soup.select("li.media[data-id]")
+    posts = soup.select(MESSAGE_ITEM_SELECTOR)
     results: List[Dict] = []
 
-    print(f"[DEBUG] Talált li.media[data-id] elemek száma: {len(posts)}")
+    print(f"[DEBUG] Talált komment elemek száma: {len(posts)}")
 
     for index, post in enumerate(posts, start=1):
         post_id = clean_text(post.get("data-id", ""))
@@ -661,8 +727,8 @@ def try_go_to_next_page(driver: webdriver.Chrome, delay: float, max_empty_skips:
 
 def ensure_output_dirs(base_output: Path) -> Tuple[Path, Path, Path]:
     prohardver_dir = base_output / "prohardver"
-    tv_audio_dir = prohardver_dir / "digcam"
-    visited_file = prohardver_dir / "visited_digcam.txt"
+    tv_audio_dir = prohardver_dir / "alaplap_chipset_ram"               #itt van a mappa amibe a topicok mentődnek
+    visited_file = prohardver_dir / "visited_alaplap_chipset_ram.txt"
 
     prohardver_dir.mkdir(parents=True, exist_ok=True)
     tv_audio_dir.mkdir(parents=True, exist_ok=True)
