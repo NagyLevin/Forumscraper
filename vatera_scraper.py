@@ -1011,13 +1011,101 @@ def unique_keep_order(items: List[str]) -> List[str]:
     return cleaned
 
 
+def clean_keep_all(items: List[str]) -> List[str]:
+    """
+    Leírás-paragrafusokhoz használjuk.
+    Fontos: itt NEM szedjük ki az ismétlődő paragrafusokat, mert Vaterán az eladók
+    gyakran szándékosan megismétlik a fizetési / átvételi / licitálási feltételeket.
+    Ha deduplikálnánk, a leírás vége hibásan lemaradhatna.
+    """
+    cleaned: List[str] = []
+    for item in items:
+        item = clean_text(item)
+        if item:
+            cleaned.append(item)
+    return cleaned
+
+
+def is_description_stop_heading(node: Tag, original_heading: Tag) -> bool:
+    """
+    Igazat ad vissza, ha a leírás után már egy új nagyobb szekció kezdődik.
+    A Vaterán az „Eladó leírása a termékről” h3 után minden <p>-t gyűjtünk,
+    amíg új h1/h2/h3/h4 címsorhoz vagy ismert következő szekcióhoz nem érünk.
+    """
+    if node is original_heading:
+        return False
+
+    if node.name in {"h1", "h2", "h3", "h4"}:
+        txt = normalize_ws_inline(node.get_text(" ", strip=True)).lower()
+        # Ha valamiért ugyanaz a címsor ismétlődne, azt nem tekintjük stopnak.
+        if "eladó leírása" in txt and "termékr" in txt:
+            return False
+        return True
+
+    txt = normalize_ws_inline(node.get_text(" ", strip=True)).lower()
+    stop_texts = [
+        "megosztás",
+        "szabálytalan hirdetés",
+        "eladó termékei",
+        "hasonló termékek",
+        "kapcsolódó termékek",
+        "ajánlott termékek",
+        "vatera biztonság",
+        "termékfigyelő",
+    ]
+
+    # Csak blokk-jellegű elemeknél állunk meg, hogy egy sima szó miatt ne vágjuk el a leírást.
+    if node.name in {"section", "aside", "nav", "footer", "header"}:
+        return any(stop in txt for stop in stop_texts)
+
+    # Ha egy külön címsor/div röviden csak a következő szekció nevét tartalmazza, ott is álljunk meg.
+    if node.name in {"div", "span", "strong"} and len(txt) <= 80:
+        return any(txt == stop or txt.startswith(stop) for stop in stop_texts)
+
+    return False
+
+
+def extract_all_paragraphs_until_next_section(heading: Tag) -> List[str]:
+    """
+    A legbiztosabb leírás-kinyerési stratégia:
+    az „Eladó leírása a termékről” címsor után dokumentumsorrendben
+    minden következő <p> elemet elmentünk, amíg új nagyobb szekciócímet nem találunk.
+
+    Nincs paragrafus darabszám-limit, és nincs deduplikálás sem:
+    ha az eladó ugyanazt a szöveget többször írja le, akkor azt többször mentjük.
+    """
+    paragraphs: List[str] = []
+
+    for node in heading.next_elements:
+        if not isinstance(node, Tag):
+            continue
+
+        if is_description_stop_heading(node, heading):
+            break
+
+        if node.name != "p":
+            continue
+
+        txt = clean_text(node.get_text("\n", strip=True))
+        if is_bad_description_paragraph(txt):
+            continue
+
+        paragraphs.append(txt)
+
+    return clean_keep_all(paragraphs)
+
+
 def extract_description_after_heading(soup: BeautifulSoup) -> str:
     """
     A kívánt rész pontosan a képen jelölt blokk:
     h3: „Eladó leírása a termékről”
-    alatta a közvetlen tartalom-divben lévő összes <p>.
-    Nem a teljes #description-pane-t olvassuk, mert abban lehet keresőmező is:
-    „Keresés a leírásban is”.
+
+    Elsődleges működés:
+    a h3 után minden következő <p> paragrafust mentünk,
+    egészen addig, amíg új nagyobb szekciócímet nem találunk.
+
+    Így hosszú leírásnál sincs darabszám-limit, tehát 3, 40 vagy akár több paragrafus is mehet a JSON data mezőbe.
+    Ismétlődő paragrafusokat sem dobunk ki, mert ezek a leírás végén is fontosak lehetnek.
     """
 
     heading: Optional[Tag] = None
@@ -1030,23 +1118,25 @@ def extract_description_after_heading(soup: BeautifulSoup) -> str:
     if not heading:
         return ""
 
-    # 1) A legfontosabb eset: a h3 közvetlen következő sibling divje tartalmazza az összes paragraphot.
+    # 1) ÚJ, legbiztosabb stratégia: h3 után minden <p>, új nagyobb szekciócímsorig.
+    all_following_paras = extract_all_paragraphs_until_next_section(heading)
+    if all_following_paras:
+        return "\n\n".join(all_following_paras)
+
+    # 2) Fallback: közvetlen sibling blokkokból gyűjtés.
     sibling_paras: List[str] = []
     for sib in heading.find_next_siblings():
         if not isinstance(sib, Tag):
             continue
-        if sib.name in {"h1", "h2", "h3", "h4"}:
-            break
-        txt = normalize_ws_inline(sib.get_text(" ", strip=True))
-        if any(stop in txt.lower() for stop in ["megosztás", "szabálytalan hirdetés", "eladó termékei"]):
+        if is_description_stop_heading(sib, heading):
             break
         sibling_paras.extend(collect_paragraphs_from_node(sib))
 
-    sibling_paras = unique_keep_order(sibling_paras)
+    sibling_paras = clean_keep_all(sibling_paras)
     if sibling_paras:
         return "\n\n".join(sibling_paras)
 
-    # 2) Ha a heading nem sibling struktúrában van, a szülő gyerekein megyünk tovább a heading után.
+    # 3) Fallback: ha a heading nem sibling struktúrában van, a szülő gyerekein megyünk tovább.
     parent = heading.parent
     if isinstance(parent, Tag):
         collect = False
@@ -1057,31 +1147,12 @@ def extract_description_after_heading(soup: BeautifulSoup) -> str:
                 continue
             if not collect or not isinstance(child, Tag):
                 continue
-            if child.name in {"h1", "h2", "h3", "h4"}:
+            if is_description_stop_heading(child, heading):
                 break
             parent_paras.extend(collect_paragraphs_from_node(child))
-        parent_paras = unique_keep_order(parent_paras)
+        parent_paras = clean_keep_all(parent_paras)
         if parent_paras:
             return "\n\n".join(parent_paras)
-
-    # 3) Végső DOM fallback: a heading utáni következő p elemek, amíg másik nagy blokk nem jön.
-    following_paras: List[str] = []
-    for p in heading.find_all_next("p"):
-        # Ha közben új h3/h2 blokkba értünk, álljunk meg.
-        prev_headers = []
-        prev = p.find_previous(["h2", "h3", "h4"])
-        if prev and prev is not heading:
-            prev_txt = normalize_ws_inline(prev.get_text(" ", strip=True)).lower()
-            if "eladó leírása" not in prev_txt:
-                break
-        txt = clean_text(p.get_text("\n", strip=True))
-        if is_bad_description_paragraph(txt):
-            continue
-        following_paras.append(txt)
-
-    following_paras = unique_keep_order(following_paras)
-    if following_paras:
-        return "\n\n".join(following_paras)
 
     return ""
 
@@ -1100,7 +1171,7 @@ def extract_description(soup: BeautifulSoup) -> str:
     ]:
         node = soup.select_one(sel)
         if isinstance(node, Tag):
-            paras = unique_keep_order(collect_paragraphs_from_node(node))
+            paras = clean_keep_all(collect_paragraphs_from_node(node))
             if paras:
                 return "\n\n".join(paras)
 
@@ -1108,7 +1179,7 @@ def extract_description(soup: BeautifulSoup) -> str:
     for sel in ["#description-pane", "[id*='description']"]:
         node = soup.select_one(sel)
         if isinstance(node, Tag):
-            paras = unique_keep_order(collect_paragraphs_from_node(node))
+            paras = clean_keep_all(collect_paragraphs_from_node(node))
             # Ha csak a keresőmező van benne, akkor ne mentsük.
             real_paras = [p for p in paras if not is_bad_description_paragraph(p)]
             if real_paras:
