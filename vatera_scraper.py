@@ -379,7 +379,7 @@ def write_topic_stream_header(
     if not header_json.endswith("}"):
         raise RuntimeError("Hibás header JSON generálás.")
 
-    text = header_json[:-1] + ',\n  "ads": [\n'
+    text = header_json[:-1].rstrip() + ',\n  "ads": [\n'
     topic_file.write_text(text, encoding="utf-8")
 
 
@@ -529,40 +529,75 @@ class BrowserFetcher:
             self.reset_context()
 
     def dismiss_overlays_if_present(self) -> None:
+        """
+        Cookiebot/Usercentrics sütiablak elfogadása.
+        Vaterán gyakran Cookiebot jelenik meg az „Összes süti engedélyezése” gombbal.
+        Ha ezt nem zárjuk be, a HTML-ben és a látható oldalon is zavarhatja a parszolást.
+        """
+
+        def try_click_locator(locator, label: str) -> bool:
+            try:
+                if locator.count() == 0:
+                    return False
+                first = locator.first
+                if not first.is_visible(timeout=800):
+                    return False
+                first.click(timeout=2500, force=True)
+                self.page.wait_for_timeout(1000)
+                print(f"[INFO] Sütiablak bezárva: {label}")
+                return True
+            except Exception:
+                return False
+
+        selectors = [
+            # Cookiebot ismert gomb ID-k
+            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+            "#CybotCookiebotDialogBodyButtonAccept",
+            "#CybotCookiebotDialogBodyLevelButtonAccept",
+            "#CybotCookiebotDialogBodyLevelButtonCustomize",
+            # Usercentrics / OneTrust / Didomi fallbackok
+            "[data-testid='uc-accept-all-button']",
+            "button#onetrust-accept-btn-handler",
+            "#didomi-notice-agree-button",
+            "button[aria-label*='elfogad' i]",
+            "button[aria-label*='allow' i]",
+        ]
+        for sel in selectors:
+            if try_click_locator(self.page.locator(sel), sel):
+                return
+
         texts = [
-            "Elfogadom",
+            "Összes süti engedélyezése",
+            "Összes cookie engedélyezése",
+            "Elfogadom az összeset",
             "Elfogadom mindet",
             "Összes elfogadása",
+            "Elfogadom",
             "Elfogadás",
+            "Accept all",
+            "Allow all",
             "Rendben",
             "Egyetértek",
             "Megértettem",
-            "OK",
         ]
         for txt in texts:
-            try:
-                locator = self.page.locator(f"text={txt}").first
-                if locator.count() > 0 and locator.is_visible():
-                    locator.click(timeout=1500, force=True)
-                    self.page.wait_for_timeout(700)
-                    break
-            except Exception:
-                pass
+            # pontosabb gomb keresés
+            if try_click_locator(self.page.get_by_role("button", name=re.compile(re.escape(txt), re.I)), txt):
+                return
+            # fallback sima szöveg alapján
+            if try_click_locator(self.page.locator(f"text={txt}"), txt):
+                return
 
-        selectors = [
-            "#didomi-notice-agree-button",
-            "button#onetrust-accept-btn-handler",
-            "[data-testid='uc-accept-all-button']",
-            "button[aria-label*='elfogad']",
-            "button[aria-label*='Elfogad']",
-        ]
-        for sel in selectors:
+        # Ha iframe-ben lenne a consent panel.
+        for frame in self.page.frames:
             try:
-                locator = self.page.locator(sel).first
-                if locator.count() > 0 and locator.is_visible():
-                    locator.click(timeout=1500, force=True)
-                    self.page.wait_for_timeout(700)
-                    break
+                for txt in texts:
+                    locator = frame.get_by_role("button", name=re.compile(re.escape(txt), re.I))
+                    if locator.count() > 0 and locator.first.is_visible(timeout=500):
+                        locator.first.click(timeout=2500, force=True)
+                        self.page.wait_for_timeout(1000)
+                        print(f"[INFO] Sütiablak bezárva iframe-ben: {txt}")
+                        return
             except Exception:
                 pass
 
@@ -789,27 +824,92 @@ def strip_rating_from_seller(text: str) -> str:
     return text
 
 
-def extract_seller(soup: BeautifulSoup) -> str:
-    selectors = [
-        'a[href*="/user/rating/rating.php"]',
-        'a[href*="rating.php"]',
-        ".seller-name",
-        "[class*='seller'] a",
-        "[class*='user'] a[href*='rating']",
+def is_bad_seller_candidate(text: str) -> bool:
+    """Kiszűri a Cookiebot / technikai / nem eladónév jellegű találatokat."""
+    t = strip_rating_from_seller(text)
+    if not t:
+        return True
+
+    low = t.lower()
+    bad_fragments = [
+        "client:",
+        "cookie",
+        "cookiebot",
+        "usercentrics",
+        "süti",
+        "adatkezel",
+        "beleegyez",
+        "partner",
+        "értékel",
+        "minősítés",
+        "visszajelzés",
+        "eladó követése",
+        "eladó termékei",
+        "szabálytalan hirdetés",
+        "megosztás",
     ]
+    if any(x in low for x in bad_fragments):
+        return True
+
+    if DATE_RE.search(t):
+        return True
+
+    # Tipikus technikai azonosító, pl. Client:20a6b3 vagy hasonló hash-szerű név.
+    if re.fullmatch(r"[A-Za-z]+:[0-9a-fA-F]{4,}", t):
+        return True
+
+    if len(t) < 2 or len(t) > 80:
+        return True
+
+    return False
+
+
+def extract_seller(soup: BeautifulSoup) -> str:
+    """
+    Vatera eladónév kinyerése.
+    A helyes elem a képen is láthatóan általában:
+      <a href="/user/rating/rating.php?..." class="btn-link ...">Rektormuhely</a>
+      <span class="winner-positive-points">(125)</span>
+    A Cookiebot miatt előfordulhat hamis „Client:...” találat, azt direkt szűrjük.
+    """
+
+    # 1) Legpontosabb Vatera selectorok.
+    selectors = [
+        '.userprodbox a[href*="/user/rating/rating.php"]',
+        '.userprodbox a[href*="rating.php"]',
+        'a.btn-link[href*="/user/rating/rating.php"]',
+        'a[href*="/user/rating/rating.php"]',
+        'a[href*="rating.php?id="]',
+        '[class*="seller"] a[href*="rating.php"]',
+        '[class*="user"] a[href*="rating.php"]',
+    ]
+
     for sel in selectors:
         for el in soup.select(sel):
             txt = strip_rating_from_seller(el.get_text(" ", strip=True))
-            if txt and len(txt) >= 2 and not re.search(r"értékel|minősítés|visszajelzés", txt, flags=re.I):
+            if not is_bad_seller_candidate(txt):
                 return txt
 
+    # 2) Ha a név és a pontszám külön sorban van, keressünk olyan linket, amely mellett winner-positive-points van.
+    for points in soup.select('.winner-positive-points, [class*="positive-points"], [class*="points"]'):
+        parent = points.parent
+        for _ in range(5):
+            if not isinstance(parent, Tag):
+                break
+            for a in parent.select('a[href]'):
+                txt = strip_rating_from_seller(a.get_text(" ", strip=True))
+                if not is_bad_seller_candidate(txt):
+                    return txt
+            parent = parent.parent
+
+    # 3) DOM-szöveges fallback az „Eladó” környékéről.
     text = clean_text(soup.get_text("\n", strip=True))
     lines = [clean_text(x) for x in text.split("\n") if clean_text(x)]
     for i, line in enumerate(lines):
-        if "Eladó" in line or "Eladó adatai" in line:
-            for nxt in lines[i + 1 : i + 6]:
+        if re.search(r"^Eladó$|Eladó adatai|Eladó információ", line, flags=re.I):
+            for nxt in lines[i + 1 : i + 10]:
                 candidate = strip_rating_from_seller(nxt)
-                if candidate and not DATE_RE.search(candidate) and len(candidate) <= 80:
+                if not is_bad_seller_candidate(candidate):
                     return candidate
 
     return "ismeretlen eladó"
@@ -858,83 +958,172 @@ def extract_auction_start_date(soup: BeautifulSoup) -> str:
     return "ismeretlen dátum"
 
 
-def paragraph_texts_from_container(container: Tag) -> List[str]:
-    paragraphs: List[str] = []
+def is_bad_description_paragraph(text: str) -> bool:
+    t = clean_text(text)
+    if not t:
+        return True
 
-    # Elsődlegesen a <p> blokkokat mentjük, mert a Vatera leírása ezekben van.
-    for p in container.select("p"):
+    low = normalize_ws_inline(t).lower()
+    bad_exact = {
+        "eladó leírása a termékről",
+        "leírás",
+        "keresés a leírásban is",
+        "keresés a leírásban",
+    }
+    if low in bad_exact:
+        return True
+
+    bad_contains = [
+        "szabálytalan hirdetés",
+        "megosztás facebook",
+        "megosztás",
+        "eladó termékei",
+        "vissza az oldal tetejére",
+    ]
+    if any(x in low for x in bad_contains):
+        return True
+
+    return False
+
+
+def collect_paragraphs_from_node(node: Tag) -> List[str]:
+    paragraphs: List[str] = []
+    for p in node.select("p"):
         txt = clean_text(p.get_text("\n", strip=True))
-        if not txt:
-            continue
-        if txt.lower() in {"eladó leírása a termékről", "leírás"}:
+        if is_bad_description_paragraph(txt):
             continue
         paragraphs.append(txt)
-
-    # Ha valamiért nincs <p>, akkor div/li fallback.
-    if not paragraphs:
-        for el in container.select("li, div"):
-            txt = clean_text(el.get_text("\n", strip=True))
-            if not txt:
-                continue
-            if "Eladó leírása a termékről" in txt and len(txt) < 80:
-                continue
-            if len(txt) >= 20:
-                paragraphs.append(txt)
-                break
-
     return paragraphs
 
 
+def unique_keep_order(items: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    seen: Set[str] = set()
+    for item in items:
+        item = clean_text(item)
+        if not item:
+            continue
+        key = normalize_ws_inline(item).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
+def extract_description_after_heading(soup: BeautifulSoup) -> str:
+    """
+    A kívánt rész pontosan a képen jelölt blokk:
+    h3: „Eladó leírása a termékről”
+    alatta a közvetlen tartalom-divben lévő összes <p>.
+    Nem a teljes #description-pane-t olvassuk, mert abban lehet keresőmező is:
+    „Keresés a leírásban is”.
+    """
+
+    heading: Optional[Tag] = None
+    for h in soup.find_all(["h1", "h2", "h3", "h4", "h5"]):
+        htxt = normalize_ws_inline(h.get_text(" ", strip=True))
+        if "eladó leírása" in htxt.lower() and "termékr" in htxt.lower():
+            heading = h
+            break
+
+    if not heading:
+        return ""
+
+    # 1) A legfontosabb eset: a h3 közvetlen következő sibling divje tartalmazza az összes paragraphot.
+    sibling_paras: List[str] = []
+    for sib in heading.find_next_siblings():
+        if not isinstance(sib, Tag):
+            continue
+        if sib.name in {"h1", "h2", "h3", "h4"}:
+            break
+        txt = normalize_ws_inline(sib.get_text(" ", strip=True))
+        if any(stop in txt.lower() for stop in ["megosztás", "szabálytalan hirdetés", "eladó termékei"]):
+            break
+        sibling_paras.extend(collect_paragraphs_from_node(sib))
+
+    sibling_paras = unique_keep_order(sibling_paras)
+    if sibling_paras:
+        return "\n\n".join(sibling_paras)
+
+    # 2) Ha a heading nem sibling struktúrában van, a szülő gyerekein megyünk tovább a heading után.
+    parent = heading.parent
+    if isinstance(parent, Tag):
+        collect = False
+        parent_paras: List[str] = []
+        for child in parent.children:
+            if child is heading:
+                collect = True
+                continue
+            if not collect or not isinstance(child, Tag):
+                continue
+            if child.name in {"h1", "h2", "h3", "h4"}:
+                break
+            parent_paras.extend(collect_paragraphs_from_node(child))
+        parent_paras = unique_keep_order(parent_paras)
+        if parent_paras:
+            return "\n\n".join(parent_paras)
+
+    # 3) Végső DOM fallback: a heading utáni következő p elemek, amíg másik nagy blokk nem jön.
+    following_paras: List[str] = []
+    for p in heading.find_all_next("p"):
+        # Ha közben új h3/h2 blokkba értünk, álljunk meg.
+        prev_headers = []
+        prev = p.find_previous(["h2", "h3", "h4"])
+        if prev and prev is not heading:
+            prev_txt = normalize_ws_inline(prev.get_text(" ", strip=True)).lower()
+            if "eladó leírása" not in prev_txt:
+                break
+        txt = clean_text(p.get_text("\n", strip=True))
+        if is_bad_description_paragraph(txt):
+            continue
+        following_paras.append(txt)
+
+    following_paras = unique_keep_order(following_paras)
+    if following_paras:
+        return "\n\n".join(following_paras)
+
+    return ""
+
+
 def extract_description(soup: BeautifulSoup) -> str:
-    containers: List[Tag] = []
+    # 1) Pontos blokk: „Eladó leírása a termékről” alatti összes paragraph.
+    desc = extract_description_after_heading(soup)
+    if desc:
+        return desc
 
-    # A képeken látható fő blokk: id="description-pane".
+    # 2) CSS fallback: description-pane-en belül h3 után közvetlen div.
     for sel in [
-        "#description-pane",
-        "[id*='description']",
-        "[class*='description']",
+        "#description-pane h3 + div",
+        "[id*='description'] h3 + div",
+        ".userprodbox h3 + div",
     ]:
-        for node in soup.select(sel):
-            if isinstance(node, Tag) and node not in containers:
-                containers.append(node)
+        node = soup.select_one(sel)
+        if isinstance(node, Tag):
+            paras = unique_keep_order(collect_paragraphs_from_node(node))
+            if paras:
+                return "\n\n".join(paras)
 
-    # Fallback: megkeressük a h3-at, amiben ez van: Eladó leírása a termékről.
-    for h in soup.find_all(["h2", "h3", "h4"]):
-        htxt = clean_text(h.get_text(" ", strip=True))
-        if "Eladó leírása" in htxt or "termékről" in htxt:
-            parent = h.parent
-            if isinstance(parent, Tag) and parent not in containers:
-                containers.append(parent)
-            nxt = h.find_next("div")
-            if isinstance(nxt, Tag) and nxt not in containers:
-                containers.append(nxt)
+    # 3) Csak akkor olvassuk az egész description-pane-t, ha nem került elő a heading.
+    for sel in ["#description-pane", "[id*='description']"]:
+        node = soup.select_one(sel)
+        if isinstance(node, Tag):
+            paras = unique_keep_order(collect_paragraphs_from_node(node))
+            # Ha csak a keresőmező van benne, akkor ne mentsük.
+            real_paras = [p for p in paras if not is_bad_description_paragraph(p)]
+            if real_paras:
+                return "\n\n".join(real_paras)
 
-    for container in containers:
-        paragraphs = paragraph_texts_from_container(container)
-        if paragraphs:
-            # Duplikált, üres és csak fejlécszerű sorok kiszűrése.
-            cleaned: List[str] = []
-            seen: Set[str] = set()
-            for para in paragraphs:
-                para = clean_text(para)
-                if not para:
-                    continue
-                if para.lower() in {"eladó leírása a termékről", "leírás"}:
-                    continue
-                key = normalize_ws_inline(para).lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                cleaned.append(para)
-
-            if cleaned:
-                return "\n\n".join(cleaned)
-
-    # Utolsó fallback: a teljes szövegben a címsor után próbálunk vágni.
+    # 4) Szöveges fallback.
     full_text = clean_text(soup.get_text("\n", strip=True))
-    m = re.search(r"Eladó leírása a termékről\s*(.+?)(Megosztás|Szabálytalan hirdetés|Eladó termékei|$)", full_text, flags=re.I | re.S)
+    m = re.search(
+        r"Eladó leírása a termékről\s*(.+?)(Megosztás|Szabálytalan hirdetés|Eladó termékei|$)",
+        full_text,
+        flags=re.I | re.S,
+    )
     if m:
         desc = clean_text(m.group(1))
+        desc = re.sub(r"^Keresés\s+a\s+leírásban\s+is\s*", "", desc, flags=re.I)
         if desc:
             return desc
 
@@ -1248,16 +1437,15 @@ if __name__ == "__main__":
     main()
 
 
-
 #
 # Alap futtatás:
-#   python vatera_scraper.py --out ./DATA --topic muszaki --preview --delay 3
+#   python vatera_scraper.py --out ./vatera --topic muszaki --preview --delay 3
 #
 # Csak első 3 oldal teszthez:
-#   python vatera_scraper.py --out ./DATA --topic muszaki_teszt --start-page 1 --end-page 3 --preview --headed
+#   python vatera_scraper.py --out ./vatera --topic muszaki_teszt --start-page 1 --end-page 3 --preview --headed
 #
 # Másik Vatera URL-lel:
-#   python vatera_scraper.py --url "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html" --out ./DATA --topic vatera_muszaki --preview
+#   python vatera_scraper.py --url "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html" --out ./vatera --topic vatera_muszaki --preview
 #
 # Gyorsabb, fej nélküli futás, nehéz erőforrások tiltásával:
-#   python vatera_scraper.py --out ./DATA --topic muszaki --preview --delay 2 --block-heavy
+#   python vatera_scraper.py --out ./vatera --topic muszaki --preview --delay 2 --block-heavy
