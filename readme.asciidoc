@@ -701,5 +701,146 @@ Hasznosabb kapcsolók:
 
 A scraper streamelt JSON append módban menti a hozzászólásokat, és félkész topic fájl esetén az utolsó mentett komment alapján próbál folytatni. CAPTCHA észlelésekor a futás hibával megáll, ilyenkor érdemes később, kisebb oldaltartománnyal és nagyobb `--delay` értékkel újrapróbálni.
 
+== Additional tools
 
+A scraperek mellett a projekt tartalmaz néhány kisebb segédscriptet is. Ezek nem önálló scraperek, hanem a már lementett JSON fájlok ellenőrzésére, javítására vagy szöveges feldolgozására szolgálnak.
+
+=== Legacy `comments` vessző javító
+
+A `fix_comments_comma.py` egy régi, már javított hibához tartozó segédscript. Csak azt az esetet javítja, amikor a JSON fájlban a `comments` tömb elejére rossz helyre került egy vessző:
+
+[source,json]
+----
+"comments": [
+,
+  {
+----
+
+Ezt a következő formára alakítja:
+
+[source,json]
+----
+"comments": [
+  {
+----
+
+[IMPORTANT]
+====
+Ez a script legacy eszköz. A hiba a scraper kódokban már javítva lett, ezért normál esetben nem kell használni. Csak régi, hibásan mentett JSON fájlok javítására maradt meg.
+====
+
+Használat: a scriptet abba a mappába kell tenni vagy onnan kell futtatni, ahol a javítandó `.json` fájlok vannak.
+
+[source,bash]
+----
+python3 fix_comments_comma.py
+----
+
+A script csak az aktuális mappában lévő `.json` fájlokat nézi át, és kiírja, hány fájlt javított.
+
+=== JSON format checker
+
+A `jsonformatcheck.py` egy megadott mappában rekurzívan megkeresi az összes `.json` fájlt, majd ellenőrzi, hogy Python `json.load()` szerint valid JSON-e mindegyik.
+
+Futtatás:
+
+[source,bash]
+----
+python jsonformatcheck.py --workdir /utvonal/a/mappahoz
+----
+
+Példa relatív mappával:
+
+[source,bash]
+----
+python jsonformatcheck.py --workdir ./hoxa
+----
+
+Kimenetként a script saját mappájába létrehoz egy `goodjson.txt` fájlt. Ebben minden JSON fájl mellett szerepel az állapota:
+
+[source,text]
+----
+complete
+badformat
+----
+
+A riport végén összesítést is ad a teljes, jó és hibás fájlokról.
+
+=== JSON to words
+
+A `jsontowords.py` a megadott mappában található JSON fájlokból szöveges dumpot készít. A fórum jellegű JSON-oknál ezeket a mezőket olvassa:
+
+* `data.content`
+* `comments[].data`
+
+Alap futtatás, szavankénti exporttal:
+
+[source,bash]
+----
+python jsontowords.py --workdir /utvonal/a/mappahoz
+----
+
+Példa:
+
+[source,bash]
+----
+python jsontowords.py --workdir ./index
+----
+
+Ebben a módban minden szó külön sorba kerül.
+
+Sor alapú exporthoz használható a `--rows` kapcsoló:
+
+[source,bash]
+----
+python jsontowords.py --workdir ./index --rows
+----
+
+Ilyenkor minden `data` mező egy sorba kerül, a sortörések és felesleges whitespace-ek egységesítve lesznek.
+
+A kimeneti fájl neve:
+
+[source,text]
+----
+jsonwordsdump.txt
+----
+
+A fájl a script saját mappájába kerül.
+
+=== JSON word count
+
+A `jsonwordcount.py` megszámolja a szavakat a megadott mappában található JSON fájlokban. A számolás ezekből a mezőkből történik:
+
+* `data.content`
+* `comments[].data`
+
+Futtatás:
+
+[source,bash]
+----
+python jsonwordcount.py --workdir /utvonal/a/mappahoz
+----
+
+Példa:
+
+[source,bash]
+----
+python jsonwordcount.py --workdir ./hoxa
+----
+
+A script minden feldolgozott JSON fájlhoz külön szószámot ír, majd a végén összesíti az összes szót, a sikeres fájlokat és a hibás fájlokat.
+
+A kimeneti fájl neve:
+
+[source,text]
+----
+jsonwordscount.txt
+----
+
+A fájl a script saját mappájába kerül.
+
+[NOTE]
+====
+A `jsontowords.py` és a `jsonwordcount.py` jelenlegi formában a fórum típusú JSON struktúrákra készült, ahol a hozzászólások a `comments` tömbben vannak. A hirdetéses scraperek egy része `ads` tömböt használ, ezért azokhoz ezek a segédeszközök csak módosítás után adnak teljes eredményt.
+====
 
