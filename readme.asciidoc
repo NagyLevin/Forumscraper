@@ -128,6 +128,134 @@ Hasznosabb kapcsolók:
 * `--preview`: komment előnézet kiírása a terminálba
 * `--debug-main-html`: a fő fórumoldal HTML-jének mentése hibakereséshez
 
+
+=== HardverApró scraper
+
+A `hardverapro_scraper.py` a `hardverapro.hu` apróhirdetéseit gyűjti ki. A scraper a hirdetéslista oldalakat offset alapján járja be, megnyitja az egyes hirdetéseket, majd a hirdetés szövegét, címét, árát, hirdetőjét, dátumát és egyéb metaadatait JSON formátumban menti.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python hardverapro_scraper.py --output ./Hardverapro --delay 1 --headless
+----
+
+A fenti parancs az eredményeket az `./Hardverapro` mappába menti, azon belül pedig a scraper létrehozza a saját `hardverapro` almappáját.
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+Hardverapro/
+└── hardverapro/
+    ├── hardverapro.json
+    └── visited_hardverapro_ads.txt
+----
+
+A `hardverapro.json` tartalmazza a kigyűjtött hirdetéseket, a `visited_hardverapro_ads.txt` pedig a már feldolgozott hirdetések azonosítóit tárolja. Ez segít abban, hogy megszakított futás után a scraper ne dolgozza fel újra ugyanazokat a hirdetéseket.
+
+==== Opcionális paraméterek
+
+Példa adott offsetről indítva:
+
+[source,bash]
+----
+python hardverapro_scraper.py --output ./Hardverapro --start-offset 500 --delay 1 --headless
+----
+
+Példa biztonságosabb, de lassabb mentéssel:
+
+[source,bash]
+----
+python hardverapro_scraper.py --output ./Hardverapro --delay 1 --headless --fsync
+----
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa, ezen belül jön létre a `hardverapro` mappa
+* `--start-offset`: kezdő listaoldali offset, csak 100-zal osztható érték lehet, például `0`, `100`, `200`
+* `--delay`: várakozás másodpercben az oldalak között
+* `--headless`: böngésző futtatása háttérben, látható ablak nélkül
+* `--page-timeout`: oldalbetöltési és elemkeresési timeout másodpercben
+* `--popup-timeout`: popupok keresésére szánt idő másodpercben
+* `--fsync`: minden mentés után fizikai lemezre írja az adatot, biztonságosabb, de lassabb
+* `--max-empty-offsets`: ennyi egymás utáni üres listaoldal után áll le a scraper
+
+==== Megjegyzések
+
+A scraper a hirdetéseket egy közös JSON fájl `comments` tömbjébe menti. Ha a `hardverapro.json` már lezárt, befejezett állapotú fájl, akkor a script nem írja felül automatikusan; új futtatáshoz a meglévő `hardverapro.json` és `visited_hardverapro_ads.txt` fájlokat törölni kell.
+
+
+=== Port scraper
+
+A `port_scraper.py` a `port.hu` fórum témáit és hozzászólásait gyűjti ki. A scraper a fő fórumoldal topiclistáit járja be, majd az egyes témák kommentoldalait dolgozza fel, és a hozzászólásokat topiconként külön JSON fájlba menti.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python port_scraper.py --output ./port
+----
+
+A fenti parancs az eredményeket az `./port` mappába menti. A scraper ezen belül létrehozza a saját `port` almappáját.
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+port/
+└── port/
+    ├── topics/
+    │   └── <topic>.json
+    └── visited.txt
+----
+
+A `topics` mappába kerülnek a témánként létrehozott JSON fájlok, a `visited.txt` pedig a már feldolgozott topicok URL-jeit tárolja. Ez segít abban, hogy megszakított vagy újraindított futásnál a scraper ne dolgozza fel újra a már kész témákat.
+
+==== Opcionális paraméterek
+
+Példa látható böngészőablakkal:
+
+[source,bash]
+----
+python port_scraper.py --output ./port --headed
+----
+
+Példa adott főoldali fórumlista oldaltól, limitált oldalszámmal:
+
+[source,bash]
+----
+python port_scraper.py --output ./port --start-page 1 --max-pages 1
+----
+
+Példa csak adott címrészletet tartalmazó topicok feldolgozására:
+
+[source,bash]
+----
+python port_scraper.py --output ./port --only-title "film"
+----
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa, ezen belül jön létre a `port` mappa
+* `--delay`: várakozási idő másodpercben az oldalak betöltése után
+* `--only-title`: csak adott címrészletet tartalmazó topicok feldolgozása
+* `--start-page`: kezdő főoldali fórumlista oldal
+* `--max-pages`: maximum feldolgozandó főoldali fórumlista oldalak száma
+* `--headed`: böngészőablak megjelenítése hibakereséshez
+* `--timeout-ms`: navigációs timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma letöltési hiba esetén
+* `--topic-reset-interval`: ennyi kommentoldalanként teljes böngésző context reset hosszú topicoknál
+* `--auto-reset-fetches`: automatikus böngésző context reset adott számú fetch után
+
+==== Megjegyzések
+
+A scraper streamelt JSON-írást használ, vagyis a hozzászólásokat futás közben folyamatosan hozzáfűzi a topic JSON fájljához. Ha egy topic fájl már lezárt JSON-ként létezik, a scraper késznek veszi. Félkész topic fájl esetén az utolsó mentett komment alapján megpróbálja folytatni a feldolgozást.
+
 === Következő scraper
 
 Ide kerülhet a következő scraper leírása.
@@ -145,4 +273,4 @@ python kovetkezo_scraper.py --output ./kimenet
 
 === További scraperek
 
-
+Ezt a szakaszt lehet tovább bővíteni az újabb scraperek dokumentációjával.
