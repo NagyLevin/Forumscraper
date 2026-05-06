@@ -1,8 +1,14 @@
 = Scraper projekt
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
 
 Ez a projekt több, különálló scraper scriptet tartalmaz. A futtatáshoz ajánlott külön Python virtuális környezetet használni.
 
 == Telepítés
+
+A függőségeket ajánlott `.venv` virtuális környezetbe telepíteni:
 
 [source,bash]
 ----
@@ -19,11 +25,17 @@ Windows alatt az aktiválás:
 .venv\Scripts\activate
 ----
 
+== Általános futtatási megjegyzések
+
+A scraperek általában a `--output` paraméterrel megadott mappába mentik az eredményeket. Hosszabb futásnál érdemes külön kimeneti mappát használni minden scraperhez, hogy az adatok és az állapotfájlok áttekinthetőek maradjanak.
+
+Hibakereséshez több scraper támogatja a `--headed` kapcsolót, amely látható böngészőablakban futtatja a Playwrightot.
+
 == Scraperek
 
 === Agroinform scraper
 
-A `agroinform_scraper.py` az Agroinform fórum témáit és hozzászólásait gyűjti ki, majd JSON formátumban menti el a megadott kimeneti mappába.
+A `agroinform_scraper.py` az `agroinform.hu` fórum témáit és hozzászólásait gyűjti ki, majd JSON formátumban menti el a megadott kimeneti mappába.
 
 ==== Futtatás
 
@@ -54,12 +66,83 @@ Hasznosabb kapcsolók:
 * `--timeout-ms`: navigációs timeout ezredmásodpercben
 * `--retries`: újrapróbálkozások száma letöltési hiba esetén
 
-=== Következő scraper
+=== Gepigeny scraper
 
-Ide jön majd a következő scraper rövid leírása, telepítési vagy futtatási megjegyzése, valamint a hozzá tartozó parancs.
+A `gepigeny_scraper.py` a `gepigeny.hu` fórumát dolgozza fel. A scraper először a fórumcsoportokat gyűjti ki, majd az egyes témákból a hozzászólásokat menti JSON formátumban.
+
+==== Futtatás
+
+Alap futtatóparancs:
 
 [source,bash]
 ----
-# python kovetkezo_scraper.py --output ./kimenet
+python gepigeny_scraper.py --output ./Gepigeny
 ----
+
+A fenti parancs az eredményeket az `./Gepigeny` mappába menti.
+
+==== Kimeneti mappaszerkezet
+
+A scraper a megadott kimeneti mappán belül saját almappát hoz létre:
+
+[source,text]
+----
+Gepigeny/
+└── gepigeny_forum/
+    ├── data/
+    │   └── <fórumcsoport>/
+    │       └── <topic>.json
+    └── state/
+        ├── visited_topics.txt
+        └── visited_forum_groups.txt
+----
+
+A `data` mappába kerülnek a kigyűjtött topic JSON fájlok, a `state` mappa pedig a már feldolgozott témák és fórumcsoportok állapotát tárolja.
+
+==== Opcionális paraméterek
+
+Példa látható böngészővel és komment előnézettel:
+
+[source,bash]
+----
+python gepigeny_scraper.py --output ./Gepigeny --headed --preview --delay 3
+----
+
+Példa csak egy adott fórumcsoport feldolgozására:
+
+[source,bash]
+----
+python gepigeny_scraper.py --output ./Gepigeny --headed --only-group "Játékokról általában"
+----
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti mappa
+* `--delay`: várakozási idő másodpercben az oldalak betöltése után
+* `--only-group`: csak adott fórumcsoport feldolgozása
+* `--only-topic`: csak adott topic feldolgozása
+* `--headed`: böngészőablak megjelenítése hibakereséshez
+* `--timeout-ms`: navigációs timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma letöltési hiba esetén
+* `--auto-reset-fetches`: automatikus böngésző reset adott számú fetch után
+* `--preview`: komment előnézet kiírása a terminálba
+* `--debug-main-html`: a fő fórumoldal HTML-jének mentése hibakereséshez
+
+=== Következő scraper
+
+Ide kerülhet a következő scraper leírása.
+
+==== Futtatás
+
+[source,bash]
+----
+python kovetkezo_scraper.py --output ./kimenet
+----
+
+==== Opcionális paraméterek
+
+* `--output`: kimeneti mappa
+
+=== További scraperek
+
 
