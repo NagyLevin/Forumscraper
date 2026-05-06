@@ -256,21 +256,450 @@ Hasznosabb kapcsolók:
 
 A scraper streamelt JSON-írást használ, vagyis a hozzászólásokat futás közben folyamatosan hozzáfűzi a topic JSON fájljához. Ha egy topic fájl már lezárt JSON-ként létezik, a scraper késznek veszi. Félkész topic fájl esetén az utolsó mentett komment alapján megpróbálja folytatni a feldolgozást.
 
-=== Következő scraper
+=== PROHARDVER scraper
 
-Ide kerülhet a következő scraper leírása.
+A `prohardver_scraper.py` a `prohardver.hu` fórum témáit és hozzászólásait gyűjti ki. A script jelenlegi beállítása az `alaplap_chipset_ram` témalistát dolgozza fel, offset alapú lapozással halad végig a topicokon, majd topiconként külön JSON fájlba menti a hozzászólásokat.
+
+Fontos különbség a többi scraperhez képest, hogy ez a scraper Selenium alapú, ezért futtatásához Chrome/Chromium és működő Selenium WebDriver környezet szükséges.
 
 ==== Futtatás
 
+Alap futtatóparancs offset tartománnyal:
+
 [source,bash]
 ----
-python kovetkezo_scraper.py --output ./kimenet
+python prohardver_scraper.py 0 6000 --output . --delay 3 --headless
 ----
+
+A két kötelező pozicionális paraméter a kezdő és a záró offset. Az offseteknek 100-zal osztható értékeknek kell lenniük, például `0`, `100`, `200`, `6000`.
+
+Példa kisebb tesztfutásra:
+
+[source,bash]
+----
+python prohardver_scraper.py 0 200 --output ./Prohardver --delay 2 --headless
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+Prohardver/
+└── prohardver/
+    ├── alaplap_chipset_ram/
+    │   └── <topic>.json
+    └── visited_alaplap_chipset_ram.txt
+----
+
+Az `alaplap_chipset_ram` mappába kerülnek a topiconként létrehozott JSON fájlok, a `visited_alaplap_chipset_ram.txt` pedig a már teljesen feldolgozott topicok URL-jeit tárolja.
 
 ==== Opcionális paraméterek
 
+Hasznosabb kapcsolók:
+
+* `start_offset`: kötelező kezdő offset, például `0`
+* `end_offset`: kötelező záró offset, például `6000`
+* `--output`: kimeneti alapmappa, ezen belül jön létre a `prohardver` mappa
+* `--delay`: várakozás másodpercben az oldalak között
+* `--headless`: böngésző futtatása háttérben, látható ablak nélkül
+
+==== Megjegyzések
+
+A scraper megszakított futás után képes folytatni a feldolgozást. Félkész topic JSON esetén az utolsó mentett komment vagy resume URL alapján próbál továbbhaladni, teljesen lezárt JSON esetén pedig a topicot késznek veszi.
+
+A script a hozzászólásokat futás közben folyamatosan hozzáfűzi a JSON fájlhoz, majd a topic végén lezárja a fájlt. Ha egy topic hibával megáll, nem kerül be a visited listába, így később újra próbálható.
+
+
+=== Vatera scraper
+
+A `vatera_scraper.py` a `vatera.hu` hirdetéslistáit dolgozza fel. Alapértelmezés szerint a műszaki cikk és mobil kategóriából indul, de a `--url` paraméterrel tetszőleges Vatera listaoldal megadható. A scraper Playwright + BeautifulSoup alapon működik, a hirdetéskártyákból kigyűjti a termékoldalak URL-jeit, majd az egyes hirdetésekről címet, eladót, dátumot és leírást ment JSON formátumba.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python vatera_scraper.py --out ./vatera --topic muszaki --preview --delay 3
+----
+
+A fenti parancs az eredményeket az `./vatera` kimeneti mappába menti, azon belül pedig a scraper létrehozza a saját `vatera` almappáját.
+
+Példa csak az első 3 oldal tesztelésére, látható böngészőablakkal:
+
+[source,bash]
+----
+python vatera_scraper.py --out ./vatera --topic muszaki_teszt --start-page 1 --end-page 3 --preview --headed
+----
+
+Példa másik Vatera lista URL megadásával:
+
+[source,bash]
+----
+python vatera_scraper.py --url "https://www.vatera.hu/muszaki-cikk-es-mobil/index-c12082.html" --out ./vatera --topic vatera_muszaki --preview
+----
+
+Példa gyorsabb, headless futáshoz nehezebb erőforrások tiltásával:
+
+[source,bash]
+----
+python vatera_scraper.py --out ./vatera --topic muszaki --preview --delay 2 --block-heavy
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+vatera/
+└── vatera/
+    ├── topics/
+    │   └── <topic>.json
+    └── state/
+        └── visited_ads.txt
+----
+
+A `topics` mappába kerül a megadott `--topic` név alapján létrehozott JSON fájl, a `state/visited_ads.txt` pedig a már feldolgozott hirdetések URL-jeit tárolja. Ez segít abban, hogy újraindított futásnál a scraper ne mentse újra ugyanazokat a hirdetéseket.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
+* `--url`: a feldolgozandó Vatera listaoldal URL-je
+* `--topic`: a mentett JSON fájl neve kiterjesztés nélkül
+* `--out`, `--output`: kimeneti mappa, ezen belül jön létre a `vatera` mappa
+* `--delay`: várakozás másodpercben a lekérések között
+* `--start-page`: kezdő listaoldal
+* `--end-page`: utolsó feldolgozandó listaoldal
+* `--max-pages`: biztonsági maximum, ha az oldalszám nem állapítható meg
+* `--preview`: eladó, dátum és rövid leírás előnézetének kiírása a terminálba
+* `--headed`: látható böngészőablak hibakereséshez
+* `--timeout-ms`: timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma fetch hiba esetén
+* `--auto-reset-fetches`: ennyi fetch után újranyitja a browser contextet
+* `--block-heavy`: képek, fontok és média tiltása gyorsításhoz
+
+==== Megjegyzések
+
+A scraper streamelt JSON append módban menti a hirdetéseket, vagyis futás közben folyamatosan hozzáfűzi az új elemeket a JSON fájlhoz. Ha a topic JSON már létezik és le van zárva, a script újranyitja hozzáfűzéshez, majd a futás végén ismét lezárja.
+
+Hosszabb Vatera futásoknál érdemes nagyobb `--delay` értéket használni, például 2-5 másodpercet, és szükség esetén `--start-page` / `--end-page` paraméterekkel kisebb tartományokra bontani a feldolgozást.
+
+=== Index Fórum scraper
+
+Az `index_scraper.py` az Index Fórum főoldaláról indulva bejárja a nagy fórumcsoportokat, azon belül az alforumokat, majd a topicok hozzászólásait menti topiconként külön JSON fájlokba. A scraper Playwright + BeautifulSoup alapon működik, és kezeli a visited állapotfájlokat, hogy újraindítás után ne dolgozza fel újra a már kész topicokat.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python index_scraper.py --output ./index --delay 2
+----
+
+Példa csak egy adott nagy kategóriára:
+
+[source,bash]
+----
+python index_scraper.py --output ./index --only-category "Általános" --delay 2
+----
+
+Példa csak egy adott alforumra:
+
+[source,bash]
+----
+python index_scraper.py --output ./index --only-subforum "A törzsasztal" --delay 2
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+index/
+└── index/
+    ├── <fórumcsoport>/
+    │   └── <alforum>/
+    │       └── <topic>.json
+    ├── visited_topics.txt
+    └── visited_forumgroups.txt
+----
+
+A `visited_topics.txt` a feldolgozott topicokat, a `visited_forumgroups.txt` pedig a teljesen feldolgozott alforumokat tárolja.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa, ezen belül jön létre az `index` mappa
+* `--delay`: várakozás másodpercben az oldalak között
+* `--only-category`: csak adott nagy fórumcsoport feldolgozása
+* `--only-subforum`: csak adott alforum feldolgozása
+* `--headed`: látható böngészőablak hibakereséshez
+* `--timeout-ms`: navigációs timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma fetch hiba esetén
+* `--auto-reset-fetches`: automatikus browser context reset adott számú fetch után
+* `--topic-reset-interval`: ennyi kommentoldalanként teljes context reset hosszú topicoknál
+* `--subforum-reset-interval`: ennyi topiclista oldalanként teljes context reset alforumon belül
+
+==== Megjegyzések
+
+A scraper appendelt JSON mentést használ. Félkész topic fájl esetén az utolsó mentett komment URL-je alapján próbálja folytatni a feldolgozást. A főoldal HTML-je hibakereséshez `debug_index_main.html` néven is mentésre kerülhet a kimeneti alapmappába.
+
+
+=== Jófogás scraper
+
+A `jofogas_scraper.py` a `jofogas.hu` hirdetéslistáit dolgozza fel. Alapértelmezés szerint a műszaki cikkek és elektronika kategóriából indul, de a `--url` paraméterrel más Jófogás listaoldal is megadható. A scraper kigyűjti a hirdetéskártyákat, majd az egyes hirdetésoldalakról címet, dátumot, eladót és leírást ment.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python jofogas_scraper.py --out ./jofogas --topic elektronika --preview --delay 3
+----
+
+Példa csak az első 5 oldal feldolgozására:
+
+[source,bash]
+----
+python jofogas_scraper.py --out ./jofogas --topic elektronika --start-page 1 --end-page 5 --preview
+----
+
+Példa látható böngészővel:
+
+[source,bash]
+----
+python jofogas_scraper.py --out ./jofogas --topic xbox --headed --delay 4
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+jofogas/
+└── jofogas/
+    ├── topics/
+    │   └── <topic>.json
+    └── state/
+        └── visited_ads.txt
+----
+
+A `topics` mappába kerül a `--topic` alapján elnevezett JSON fájl, a `state/visited_ads.txt` pedig a már feldolgozott hirdetések URL-jeit tárolja.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
+* `--url`: feldolgozandó Jófogás listaoldal URL-je
+* `--topic`: a mentett JSON fájl neve kiterjesztés nélkül
+* `--out`, `--output`: kimeneti mappa, ezen belül jön létre a `jofogas` mappa
+* `--delay`: várakozás másodpercben a lekérések között
+* `--start-page`: kezdő listaoldal
+* `--end-page`: utolsó feldolgozandó listaoldal
+* `--preview`: eladó, dátum és leírás előnézetének kiírása
+* `--headed`: látható böngészőablak hibakereséshez
+* `--timeout-ms`: timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma
+* `--auto-reset-fetches`: ennyi fetch után újranyitja a browser contextet
+
+==== Megjegyzések
+
+A scraper streamelt JSON append módban dolgozik. Ha a topic JSON már létezik és le van zárva, a script újranyitja hozzáfűzéshez, majd a futás végén újra lezárja. A visited lista miatt ugyanazt a hirdetést nem menti újra.
+
+
+=== SG Fórum scraper
+
+Az `sg_forum_scraper.py` az `sg.hu` fórumát dolgozza fel. A fő fórumoldalról indulva a megengedett szekciók kategóriáit járja be, majd az egyes témák hozzászólásait menti JSON formátumban.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python sg_forum_scraper.py --output ./SG --preview --delay 3
+----
+
+Példa látható böngészővel:
+
+[source,bash]
+----
+python sg_forum_scraper.py --output ./SG --headed
+----
+
+Példa adott kategóriára:
+
+[source,bash]
+----
+python sg_forum_scraper.py --output ./SG --headed --only-category "Általános eszmecsere"
+----
+
+Példa adott topicra:
+
+[source,bash]
+----
+python sg_forum_scraper.py --output ./SG --headed --only-topic "Garfield képregény"
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+SG/
+└── sg_forum/
+    ├── data/
+    │   └── <szekció>/
+    │       └── <kategória>/
+    │           └── <topic>.json
+    └── state/
+        ├── visited_topics.txt
+        └── visited_categories.txt
+----
+
+A `data` mappában a szekció/kategória/topic bontás szerinti JSON fájlok vannak. A `state` mappa tárolja a már feldolgozott témákat és kategóriákat.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
 * `--output`: kimeneti mappa
+* `--delay`: várakozás másodpercben az oldalak között
+* `--only-section`: csak adott szekció feldolgozása
+* `--only-category`: csak adott kategória feldolgozása
+* `--only-topic`: csak adott téma feldolgozása
+* `--headed`: látható böngészőablak hibakereséshez
+* `--timeout-ms`: timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma
+* `--topic-reset-interval`: context reset intervallum hosszú topicoknál
+* `--auto-reset-fetches`: automatikus context reset adott számú fetch után
+* `--preview`: komment előnézet kiírása
+* `--debug-head`: a fő fórumoldal HTML head részének kiírása hibakereséshez
 
-=== További scraperek
+==== Megjegyzések
 
-Ezt a szakaszt lehet tovább bővíteni az újabb scraperek dokumentációjával.
+A scraper csak a konfigurált fórumrészeket dolgozza fel, például az általános, számítástechnikai és hírekhez kapcsolódó fórumokat. A topic JSON fájlok streamelve készülnek, a félkész fájlokból pedig újraindításkor folytatható a mentés.
+
+
+=== Hobbielektronika scraper
+
+A `hobbye_scraper.py` a `hobbielektronika.hu` fórum főoldali topiclistáit járja be, majd topiconként menti a hozzászólásokat. A scraper Playwright + BeautifulSoup alapon működik, és külön figyeli a szerver túlterheltségi tiltóoldalát.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python hobbye_scraper.py --output ./hobbielektronika
+----
+
+Példa látható böngészőablakkal:
+
+[source,bash]
+----
+python hobbye_scraper.py --output ./hobbielektronika --headed
+----
+
+Példa adott címrészletre és oldallimitre:
+
+[source,bash]
+----
+python hobbye_scraper.py --output ./hobbielektronika --only-title "arduino" --start-page 1 --max-pages 3 --headed
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+hobbielektronika/
+└── hobbielektronika/
+    ├── topics/
+    │   └── <topic>.json
+    └── visited.txt
+----
+
+A `topics` mappába kerülnek a topiconkénti JSON fájlok, a `visited.txt` pedig a már feldolgozott topicok URL-jeit tárolja.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa
+* `--delay`: várakozás másodpercben az oldalak között
+* `--only-title`: csak adott címrészletet tartalmazó topicok feldolgozása
+* `--start-page`: kezdő főoldali fórumlista oldal
+* `--max-pages`: maximum feldolgozandó főoldali listaoldalak száma
+* `--headed`: látható böngészőablak hibakereséshez
+* `--fetch-retries`: fetch újrapróbálkozások száma
+* `--retry-sleep`: várakozás az újrapróbálások között
+* `--nav-timeout-ms`: navigációs timeout ezredmásodpercben
+* `--default-timeout-ms`: általános Playwright timeout ezredmásodpercben
+
+==== Megjegyzések
+
+Ha a szerver excessive load policy oldalt ad vissza, a scraper külön hibával leáll, hogy ne terhelje tovább az oldalt. A topic JSON fájlok streamelt append módban készülnek, és visited fájl segíti az újraindíthatóságot.
+
+
+=== Hoxa scraper
+
+A `hoxa_scraper.py` a `hoxa.hu` fórumlistáit és topicjait dolgozza fel. A scraper kezeli a Hoxa egyedi fórum URL-struktúráját, oldallapozását, a cookie/consent rétegeket, valamint CAPTCHA észlelésekor leáll.
+
+==== Futtatás
+
+Alap futtatóparancs:
+
+[source,bash]
+----
+python3 hoxa_scraper.py --output ./hoxa
+----
+
+Példa oldaltartomány feldolgozására látható böngészővel:
+
+[source,bash]
+----
+python3 hoxa_scraper.py --output ./hoxa --start-page 1 --end-page 10 --max-pages 10 --headed
+----
+
+Példa csak adott címrészletű topicokra:
+
+[source,bash]
+----
+python3 hoxa_scraper.py --output ./hoxa --only-title "segély" --headed
+----
+
+==== Kimeneti mappaszerkezet
+
+[source,text]
+----
+hoxa/
+└── hoxa/
+    ├── topics/
+    │   └── <topic>.json
+    └── visited.txt
+----
+
+A `topics` mappába kerülnek a topiconkénti JSON fájlok, a `visited.txt` pedig a már feldolgozott topicok URL-jeit tárolja.
+
+==== Opcionális paraméterek
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa, ezen belül jön létre a `hoxa` mappa
+* `--delay`: várakozás másodpercben az oldalak között
+* `--only-title`: csak adott címrészletet tartalmazó topicok feldolgozása
+* `--start-page`: kezdő fórumlista oldal
+* `--end-page`: utolsó feldolgozandó fórumlista oldal
+* `--max-pages`: maximum feldolgozandó főoldali listaoldalak száma
+* `--headed`: látható böngészőablak hibakereséshez
+* `--timeout-ms`: navigációs timeout ezredmásodpercben
+* `--retries`: fetch újrapróbálkozások száma
+* `--topic-reset-interval`: ennyi kommentoldalanként teljes context reset hosszú topicoknál
+* `--auto-reset-fetches`: ennyi fetch után automatikus context reset
+
+==== Megjegyzések
+
+A scraper streamelt JSON append módban menti a hozzászólásokat, és félkész topic fájl esetén az utolsó mentett komment alapján próbál folytatni. CAPTCHA észlelésekor a futás hibával megáll, ilyenkor érdemes később, kisebb oldaltartománnyal és nagyobb `--delay` értékkel újrapróbálni.
+
+
+
