@@ -1,0 +1,65 @@
+= Scraper projekt
+
+Ez a projekt több, különálló scraper scriptet tartalmaz. A futtatáshoz ajánlott külön Python virtuális környezetet használni.
+
+== Telepítés
+
+[source,bash]
+----
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m playwright install chromium
+----
+
+Windows alatt az aktiválás:
+
+[source,powershell]
+----
+.venv\Scripts\activate
+----
+
+== Scraperek
+
+=== Agroinform scraper
+
+A `agroinform_scraper.py` az Agroinform fórum témáit és hozzászólásait gyűjti ki, majd JSON formátumban menti el a megadott kimeneti mappába.
+
+==== Futtatás
+
+A legfontosabb futtatóparancs:
+
+[source,bash]
+----
+python agroinform_scraper.py --output ./agro
+----
+
+A fenti parancs az eredményeket az `./agro` mappába menti.
+
+==== Opcionális paraméterek
+
+[source,bash]
+----
+python agroinform_scraper.py --output ./agro --headed --start-page 1 --max-pages 1
+----
+
+Hasznosabb kapcsolók:
+
+* `--output`: kimeneti alapmappa
+* `--delay`: várakozási idő másodpercben az oldalak betöltése után
+* `--only-title`: csak adott címrészletet tartalmazó témák feldolgozása
+* `--start-page`: kezdő fórumlista oldal
+* `--max-pages`: maximum feldolgozandó főoldali fórumlista oldalak száma
+* `--headed`: böngészőablak megjelenítése hibakereséshez
+* `--timeout-ms`: navigációs timeout ezredmásodpercben
+* `--retries`: újrapróbálkozások száma letöltési hiba esetén
+
+=== Következő scraper
+
+Ide jön majd a következő scraper rövid leírása, telepítési vagy futtatási megjegyzése, valamint a hozzá tartozó parancs.
+
+[source,bash]
+----
+# python kovetkezo_scraper.py --output ./kimenet
+----
+
